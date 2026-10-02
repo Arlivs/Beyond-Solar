@@ -16,10 +16,12 @@ const SKIN = 0.25;               // fraction of dry mass that heats as skin
 // ---- aero / contact geometry (recomputed on topology change) ----
 function vesselGeometry(v) {
   const cols = new Map();
+  const flip = new Map();   // rid -> part stands upside down in vessel axes (came in through docking)
   for (const p of v.parts) {
     if (p.dead) continue;
     const d = PART[p.id];
     if (d.attach !== 'stack') continue;
+    if (p.q) { const ax = partAxis(p); if (Math.abs(ax[1]) < 0.7) continue; if (ax[1] < 0) flip.set(p.rid, true); }
     const key = Math.round(p.pos[0] * 20) + ',' + Math.round(p.pos[2] * 20);
     if (!cols.has(key)) cols.set(key, []);
     cols.get(key).push(p);
@@ -27,28 +29,30 @@ function vesselGeometry(v) {
   const front = new Map(), back = new Map(); // rid -> CdA exposed
   for (const list of cols.values()) {
     list.sort((a, b) => b.pos[1] - a.pos[1]);
+    // faces in vessel axes: a flipped part shows its own bottom (shield, nozzle) on top and vice versa
+    const dT = (q) => { const d = PART[q.id]; return flip.get(q.rid) ? d.dBot : d.dTop; };
+    const dB = (q) => { const d = PART[q.id]; return flip.get(q.rid) ? d.dTop : d.dBot; };
     for (let i = 0; i < list.length; i++) {
-      const d = PART[list[i].id];
-      const above = i > 0 ? PART[list[i - 1].id].dBot : 0;
-      const below = i < list.length - 1 ? PART[list[i + 1].id].dTop : 0;
-      const aTop = Math.max(0, d.dTop * d.dTop - above * above) * Math.PI / 4;
-      const aBot = Math.max(0, d.dBot * d.dBot - below * below) * Math.PI / 4;
-      const cdTop = i === 0 ? (d.nose != null ? d.nose : 0.9) : 0.7;
-      const cdBot = d.shield ? 1.3 : d.engine ? 0.6 : d.shape === 'pod' ? 0.9 : 0.9;
+      const d = PART[list[i].id], fl = flip.get(list[i].rid);
+      const above = i > 0 ? dB(list[i - 1]) : 0;
+      const below = i < list.length - 1 ? dT(list[i + 1]) : 0;
+      const aTop = Math.max(0, dT(list[i]) ** 2 - above * above) * Math.PI / 4;
+      const aBot = Math.max(0, dB(list[i]) ** 2 - below * below) * Math.PI / 4;
+      const cdNose = d.nose != null ? d.nose : 0.9, cdTail = d.shield ? 1.3 : d.engine ? 0.6 : 0.9;
+      const cdTop = i === 0 ? (fl ? cdTail : cdNose) : 0.7;
+      const cdBot = fl ? cdNose : cdTail;
       if (aTop > 0) front.set(list[i].rid, aTop * cdTop);
       if (aBot > 0) back.set(list[i].rid, aBot * cdBot);
     }
   }
-  const g = { front, back, frontSum: 0, backSum: 0, side: [], fins: [], contacts: [] };
+  const g = { front, back, frontSum: 0, backSum: 0, side: [], fins: [], wings: [], contacts: [] };
   for (const x of front.values()) g.frontSum += x;
   for (const x of back.values()) g.backSum += x;
   for (const p of v.parts) {
     if (p.dead) continue;
     const d = PART[p.id];
-    if (d.fin) {
-      const dir = p.dir || [1, 0, 0];
-      g.fins.push({ rid: p.rid, n: [dir[2], 0, -dir[0]], area: d.fin.area });
-    }
+    if (d.fin) g.fins.push({ rid: p.rid, n: Q.rot(partQ(p), [0, 0, 1]), area: d.fin.area });
+    if (d.wing) g.wings.push({ rid: p.rid, n: Q.rot(partQ(p), [0, 0, 1]), w: d.wing });
     let side;
     if (d.attach === 'stack') side = 0.55 * (d.dTop + d.dBot) / 2 * d.h;
     else side = 0.6 * (d.w || 0.2) * d.h;
@@ -59,13 +63,13 @@ function vesselGeometry(v) {
       const rt = Math.max(d.dTop / 2, 0.05), rb = Math.max(d.dBot / 2, 0.05);
       for (let k = 0; k < 4; k++) {
         const a = k * Math.PI / 2 + Math.PI / 4, c = Math.cos(a), s = Math.sin(a);
-        g.contacts.push({ rid: p.rid, pt: [p.pos[0] + c * rb, p.pos[1] - d.h / 2, p.pos[2] + s * rb] });
-        g.contacts.push({ rid: p.rid, pt: [p.pos[0] + c * rt, p.pos[1] + d.h / 2, p.pos[2] + s * rt] });
+        g.contacts.push({ rid: p.rid, pt: partPt(p, [c * rb, -d.h / 2, s * rb]) });
+        g.contacts.push({ rid: p.rid, pt: partPt(p, [c * rt, d.h / 2, s * rt]) });
       }
     } else if (p.dir) {
-      const o = V.scale(p.dir, (d.depth || 0.2) / 2);
-      g.contacts.push({ rid: p.rid, pt: [p.pos[0] + o[0], p.pos[1] - d.h / 2, p.pos[2] + o[2]] });
-      g.contacts.push({ rid: p.rid, pt: [p.pos[0] + o[0], p.pos[1] + d.h / 2, p.pos[2] + o[2]] });
+      const o = (d.depth || 0.2) / 2;
+      g.contacts.push({ rid: p.rid, pt: partPt(p, [o, -d.h / 2, 0]) });
+      g.contacts.push({ rid: p.rid, pt: partPt(p, [o, d.h / 2, 0]) });
     }
   }
   v.geo = g;
@@ -75,7 +79,7 @@ function vesselGeometry(v) {
 function legFoot(p) {
   const d = PART[p.id];
   const L = d.legs.len;
-  return [p.pos[0] + p.dir[0] * (d.depth / 2 + L * 0.45), p.pos[1] - d.h / 2 - L * 0.8, p.pos[2] + p.dir[2] * (d.depth / 2 + L * 0.45)];
+  return partPt(p, [d.depth / 2 + L * 0.45, -d.h / 2 - L * 0.8, 0]);
 }
 
 // ---- resources ----
@@ -106,12 +110,13 @@ function hasControl(v) {
     if (p.dead) continue;
     const c = PART[p.id].command;
     if (!c) continue;
-    if (c.crew > 0) return true;
+    if (c.crew > 0) { if (!p.crew || p.crew.length) return true; continue; }   // a pod needs someone aboard
     if (vesselRes(v, 'ELEC') > 0.01) return true;
   }
   return false;
 }
-function isCrewed(v) { return v.parts.some(p => !p.dead && PART[p.id].command && PART[p.id].command.crew > 0); }
+// p.crew undefined: vessels from before the astronaut corps count as fully crewed
+function isCrewed(v) { return v.parts.some(p => !p.dead && PART[p.id].command && PART[p.id].command.crew > 0 && (!p.crew || p.crew.length)); }
 
 function torqueAuthority(v, mp, thrusts) {
   const T = [0, 0, 0];
@@ -137,11 +142,23 @@ function torqueAuthority(v, mp, thrusts) {
   return T;
 }
 
+// control reference: "control from here" on a docking port turns the control frame so that +Y is the port axis
+function ctrlRef(v) {
+  const p = v.ctrlPort != null ? v.parts[v.ctrlPort] : null;
+  if (!p || p.dead || !PART[p.id].dock) return null;
+  return Q.fromTo([0, 1, 0], V.scale(partAxis(p), p.portDir || 1));
+}
+function ctrlQ(v) { const r = ctrlRef(v); return r ? Q.mul(v.q, r) : v.q; }
+
 // ---- SAS ----
+// velocity the navball / SAS refer to: surface, orbit, or relative to the target (v.tgtRel, set by the game)
+function navVelocity(v) {
+  const m = navSpeedMode(v);
+  if (m === 'target' && v.tgtRel) return v.tgtRel;
+  return m === 'surface' ? V.sub(v.v, V.cross(bodyOmega(v.body), v.r)) : v.v;
+}
 function sasTargetDir(v, mode, ut) {
-  const b = v.body;
-  const surfMode = navSpeedMode(v) === 'surface';
-  const vel = surfMode ? V.sub(v.v, V.cross(bodyOmega(b), v.r)) : v.v;
+  const vel = navVelocity(v);
   if (V.len(vel) < 0.05 && mode !== 'stab' && mode !== 'node' && mode !== 'radout' && mode !== 'radin') return null;
   const pro = V.norm(vel), nrm = V.norm(V.cross(v.r, vel)), rad = V.cross(pro, nrm);
   switch (mode) {
@@ -153,6 +170,7 @@ function sasTargetDir(v, mode, ut) {
     case 'radin': return V.len(vel) > 0.05 ? V.neg(rad) : V.neg(V.norm(v.r));
     case 'node': return v.nodeBurn && V.len(v.nodeBurn) > 1e-3 ? V.norm(v.nodeBurn) : null;
     case 'target': return v.targetDir || null;
+    case 'antitarget': return v.targetDir ? V.neg(v.targetDir) : null;
   }
   return null;
 }
@@ -172,12 +190,15 @@ function sasControl(v, mp, auth, ut) {
   } else {
     const d = sasTargetDir(v, v.sasMode, ut);
     if (!d) { v.sasHold = null; return [-v.w[0] * 4, -v.w[1] * 4, -v.w[2] * 4].map((x, i) => clamp(x * I[i] / Math.max(auth[i], 1), -1, 1)); }
-    const dl = Q.invRot(v.q, d);
+    // point the control axis (vessel +Y, or a docking port) at d; error computed in the control frame
+    const ref = ctrlRef(v);
+    const dl = Q.invRot(ref ? Q.mul(v.q, ref) : v.q, d);
     const ax = [dl[2], 0, -dl[0]];
     const al = Math.hypot(ax[0], ax[2]);
     const ang = Math.acos(clamp(dl[1], -1, 1));
     if (al > 1e-9) e = [ax[0] / al * ang, 0, ax[2] / al * ang];
     else if (dl[1] < 0) e = [Math.PI, 0, 0];
+    if (ref) e = Q.rot(ref, e);
   }
   const u = [0, 0, 0];
   for (let i = 0; i < 3; i++) {
@@ -251,7 +272,10 @@ function physicsStep(v, dt, ut, ctl, hooks) {
   // locked on the ground: wait for thrust
   if (v.lock) {
     applyLock(v, ut);
-    if (!v.prelaunchHold && thrustWanted(v)) unlock(v);
+    if (!v.prelaunchHold && (thrustWanted(v) || driveWanted(v, ctl))) {
+      unlock(v);
+      if (v.prelaunch) { v.prelaunch = false; hooks && hooks.event && hooks.event('launch', { vessel: v }); }
+    }
     else { tickResources(v, dt, ut, false, null, mp); v.situation = v.prelaunch ? 'PRELAUNCH' : 'LANDED'; return; }
   }
 
@@ -262,13 +286,23 @@ function physicsStep(v, dt, ut, ctl, hooks) {
   // engines
   const thrusts = [];
   let thrustTotal = 0;
+  const Fe = [0, 0, 0];
   for (const p of v.parts) {
     if (p.dead || !p.st.eng || !p.st.eng.on) continue;
     const d = PART[p.id], e = d.engine;
-    const thr = e.throttle ? (control ? v.throttle : 0) : 1;
+    let thr = e.throttle ? (control ? v.throttle : 0) : 1;
     p.st.eng.thr = 0;
+    let airF = 1;
+    if (e.air) {
+      // turbine spools towards the throttle; needs oxygen; thrust follows density and Mach
+      const st = p.st.eng;
+      st.spool = (st.spool || 0) + (thr - (st.spool || 0)) * Math.min(1, dt / e.air.spool);
+      thr = st.spool;
+      airF = b.atm && b.atm.oxygen && atm.p > 0.003 ? jetFactor(e.air, atm.rho / b.atm.rho0, V.len(vAir) / 340) : 0;
+      if (airF <= 0.001) { st.thr = 0; continue; }
+    }
     if (thr <= 0) continue;
-    const md = engineMdot(e) * thr;
+    const md = engineMdot(e) * thr * airF;
     const need = md * dt / 1000;
     const key = e.prop;
     const got = poolDraw(v, engineSources(v, p), key, need);
@@ -283,13 +317,14 @@ function physicsStep(v, dt, ut, ctl, hooks) {
     p.st.eng.thr = thr * f;
     thrusts.push([p, Fn]);
     thrustTotal += Fn;
-    // thrust along local +Y through engine position
+    // thrust along the engine's own axis (vessel +Y unless it came in upside down through docking)
     const arm = V.sub(p.pos, mp.com);
-    const Fl = [0, Fn, 0];
+    const Fl = V.scale(partAxis(p), Fn);
+    Fe[0] += Fl[0]; Fe[1] += Fl[1]; Fe[2] += Fl[2];
     const tq = V.cross(arm, Fl);
     tau[0] += tq[0]; tau[1] += tq[1]; tau[2] += tq[2];
   }
-  if (thrustTotal > 0) F = V.add(F, Q.rot(v.q, [0, thrustTotal, 0]));
+  if (thrustTotal > 0) F = V.add(F, Q.rot(v.q, Fe));
   v.thrustNow = thrustTotal;
 
   // attitude control
@@ -297,7 +332,10 @@ function physicsStep(v, dt, ut, ctl, hooks) {
   v.auth = auth;
   let u = [0, 0, 0];
   if (control) {
-    const inp = [-(ctl.pitch || 0), ctl.roll || 0, -(ctl.yaw || 0)];
+    const ref = ctrlRef(v);
+    const driving = v.inContact && v.parts.some(p => !p.dead && PART[p.id].gear && PART[p.id].gear.motor);
+    let inp = [driving ? 0 : -(ctl.pitch || 0), ctl.roll || 0, driving ? 0 : -(ctl.yaw || 0)];
+    if (ref) inp = Q.rot(ref, inp);
     const anyInput = inp.some(x => Math.abs(x) > 0.01);
     if (v.sas) {
       if (anyInput && v.sasMode === 'stab') v.sasHold = null;
@@ -313,7 +351,8 @@ function physicsStep(v, dt, ut, ctl, hooks) {
         const need = fmax * (Math.abs(ctl.tx || 0) + Math.abs(ctl.ty || 0) + Math.abs(ctl.tz || 0)) / (240 * G0) * dt / 1000;
         const got = poolDraw(v, allRids(v), 'MONO', need);
         const f = need > 0 ? got / need : 0;
-        F = V.add(F, Q.rot(v.q, [(ctl.tx || 0) * fmax * f, (ctl.ty || 0) * fmax * f, (ctl.tz || 0) * fmax * f]));
+        const tr = [(ctl.tx || 0) * fmax * f, (ctl.ty || 0) * fmax * f, (ctl.tz || 0) * fmax * f];
+        F = V.add(F, Q.rot(v.q, ref ? Q.rot(ref, tr) : tr));
       }
     }
   }
@@ -341,6 +380,27 @@ function physicsStep(v, dt, ut, ctl, hooks) {
         const vl = Math.hypot(vp[0], vp[2]);
         const k = -0.5 * rho * s.cda * vl;
         const f = [k * vp[0], -0.5 * rho * s.fr * Math.abs(vp[1]) * vp[1], k * vp[2]];
+        Fl[0] += f[0]; Fl[1] += f[1]; Fl[2] += f[2];
+        const tq = V.cross(arm, f); tau[0] += tq[0]; tau[1] += tq[1]; tau[2] += tq[2];
+      }
+      // wings: linear lift up to the stall, then a falling plateau; induced + profile drag; control deflection
+      for (const wg of g.wings) {
+        const p = v.parts[wg.rid];
+        if (p.dead) continue;
+        const arm = V.sub(p.pos, mp.com);
+        const vp = V.add(ua, V.cross(v.w, arm));
+        const vl = V.len(vp); if (vl < 0.1) continue;
+        const q = 0.5 * rho * vl * vl, W2 = wg.w;
+        const s = V.dot(vp, wg.n) / vl, as = Math.abs(s), sS = Math.sin(W2.stall * DEG);
+        let cn = as < sS ? W2.k * as : W2.k * sS * (1 - 0.55 * Math.min(1, (as - sS) / 0.35)) + 1.2 * (as - sS);
+        cn *= -Math.sign(s);
+        if (W2.ctrl) {
+          const tu = V.cross(arm, wg.n), tl = V.len(tu);
+          const dfl = tl > 1e-6 ? clamp((u[0] * tu[0] + u[1] * tu[1] + u[2] * tu[2]) / tl, -1, 1) : 0;
+          cn += dfl * W2.k * Math.sin(W2.ctrl * DEG);
+          p._defl = dfl;
+        }
+        const f = V.add(V.scale(wg.n, q * W2.area * cn), V.scale(vp, -q * W2.area * (0.012 + 0.07 * cn * cn) / vl));
         Fl[0] += f[0]; Fl[1] += f[1]; Fl[2] += f[2];
         const tq = V.cross(arm, f); tau[0] += tq[0]; tau[1] += tq[1]; tau[2] += tq[2];
       }
@@ -401,7 +461,7 @@ function physicsStep(v, dt, ut, ctl, hooks) {
   if (!b.gas && alt < b.hMax + bnd.size + 60) {
     const gnd = vesselGround(v, ut);
     v.radarAlt = alt - gnd.h;
-    if (v.radarAlt < bnd.size + 50) contact = groundContact(v, dt, ut, mp, F, tau, hooks, gnd);
+    if (v.radarAlt < bnd.size + 50) { contact = groundContact(v, dt, ut, mp, F, tau, hooks, gnd); if (wheelContacts(v, dt, mp, F, tau, hooks, gnd, ctl)) contact = true; }
   }
   if (b.gas && alt < 0) { hooks && hooks.event && hooks.event('crushed', {}); destroyVessel(v, hooks, 'Раздавлен давлением атмосферы ' + b.name); return; }
 
@@ -435,6 +495,70 @@ function physicsStep(v, dt, ut, ctl, hooks) {
   } else v.restT = 0;
   v.inContact = contact;
   v.situation = contact ? 'LANDED' : (alt < (b.atm ? b.atm.top : 0) ? 'FLYING' : 'SPACE');
+}
+
+// air-breathing thrust factor: density^0.7 times a Mach curve that rises to the design point then dies at machMax
+function jetFactor(air, relRho, mach) {
+  const rise = 1 + 0.5 * Math.min(mach, air.peak) / air.peak;
+  const fall = mach > air.peak ? Math.max(0, 1 - Math.pow((mach - air.peak) / (air.machMax - air.peak), 2)) : 1;
+  return Math.pow(Math.max(0, relRho), 0.7) * rise * fall;
+}
+function driveWanted(v, ctl) { return Math.abs(ctl.pitch || 0) > 0.01 && v.parts.some(p => !p.dead && PART[p.id].gear && PART[p.id].gear.motor); }
+// wheel centre in vessel axes (gear extended)
+function wheelCentre(p) { const d = PART[p.id]; return partPt(p, [d.depth / 2 + d.gear.reach, 0, 0]); }
+
+// wheels: a stiff suspension along the ground normal, rolling along the vessel's heading (steered), side grip,
+// brakes and electric motors. Returns true if any wheel touches.
+function wheelContacts(v, dt, mp, F, tau, hooks, gnd, ctl) {
+  const wheels = v.parts.filter(p => !p.dead && PART[p.id].gear && p.st.gear !== false);
+  if (!wheels.length) return false;
+  const b = v.body, m = mp.m, n = gnd.n, omB = bodyOmega(b);
+  const pg = V.scale(V.norm(v.r), b.R + gnd.h), wW = Q.rot(v.q, v.w), fwdV = Q.rot(v.q, [0, 1, 0]);
+  const kS = m * Math.max(b.g0, 1) / (wheels.length * 0.05), cS = 2 * 0.9 * Math.sqrt(kS * m / wheels.length);
+  const pts = wheels.map(p => { const armL = V.sub(wheelCentre(p), mp.com), armW = Q.rot(v.q, armL), cW = V.add(v.r, armW); return { p, armL, armW, cW, x: PART[p.id].gear.r - V.dot(V.sub(cW, pg), n) }; });
+  const touching = pts.filter(w => w.x > 0);
+  if (!touching.length) { for (const w of pts) w.p._comp = 0; return false; }
+  const ms = m / touching.length;
+  const prev = v._wheelPrev || new Set(), now = new Set();
+  const drive = clamp(ctl.pitch || 0, -1, 1), steerIn = clamp(ctl.yaw || 0, -1, 1);
+  const powered = vesselRes(v, 'ELEC') > 0.01;
+  let elecNeed = 0;
+  for (const w of pts) {
+    const p = w.p, G = PART[p.id].gear;
+    p._comp = Math.max(0, Math.min(w.x, G.travel));
+    if (w.x <= 0) continue;
+    now.add(p.rid);
+    const vpt = V.sub(V.add(v.v, V.cross(wW, w.armW)), V.cross(omB, w.cW));
+    const vn = V.dot(vpt, n);
+    if (!prev.has(p.rid) && -vn > G.crash) { explodePart(v, p.rid, hooks, 'жёсткое касание'); continue; }
+    const fn = Math.max(0, kS * w.x - cS * vn);
+    // heading: front wheels steer (rovers steer rear wheels the other way), less at speed
+    let fwd = V.norm(V.reject(fwdV, n));
+    const yRel = w.armL[1], spd = Math.abs(V.dot(vpt, fwd));
+    const steers = G.motor ? Math.abs(yRel) > 0.3 : yRel > 0.5;
+    if (steers && steerIn) {
+      const a = -steerIn * G.steer * DEG * Math.sign(yRel) / (1 + spd / 12);
+      fwd = V.add(V.scale(fwd, Math.cos(a)), V.scale(V.cross(n, fwd), Math.sin(a)));
+    }
+    const lat = V.cross(n, fwd);
+    const vt = V.sub(vpt, V.scale(n, vn)), vf = V.dot(vt, fwd), vl = V.dot(vt, lat);
+    let ff = 0;
+    if (G.motor && drive && powered) {
+      const lim = clamp(1 - Math.max(0, vf * Math.sign(drive)) / G.motor.speed, 0, 1);
+      ff += G.motor.force * 1000 * drive * lim; elecNeed += G.motor.elec * Math.abs(drive) * dt;
+    }
+    // brakes: up to 0.8 N; free rolling: 1.2% of N, plus a parking grip once the wheel has all but stopped
+    const roll = ctl.brake ? Math.min(0.8 * fn, 0.5 * ms * Math.abs(vf) / dt) : Math.min(0.012 * fn + (Math.abs(vf) < 0.05 ? 0.5 * fn : 0), 0.5 * ms * Math.abs(vf) / dt);
+    ff -= Math.sign(vf) * roll;
+    ff = clamp(ff, -0.9 * fn, 0.9 * fn);                                   // traction limit: the wheel spins instead
+    const fl = -Math.sign(vl) * Math.min(0.9 * fn, 0.5 * ms * Math.abs(vl) / dt);
+    const f = V.add(V.add(V.scale(n, fn), V.scale(fwd, ff)), V.scale(lat, fl));
+    F[0] += f[0]; F[1] += f[1]; F[2] += f[2];
+    const tq = V.cross(w.armL, Q.invRot(v.q, f)); tau[0] += tq[0]; tau[1] += tq[1]; tau[2] += tq[2];
+  }
+  if (elecNeed > 0) poolDraw(v, allRids(v), 'ELEC', elecNeed);
+  v._wheelPrev = now;
+  return now.size > 0;
 }
 
 function thrustWanted(v) {
@@ -471,6 +595,13 @@ function groundContact(v, dt, ut, mp, F, tau, hooks, gnd) {
   let any = false;
   const Fadd = [0, 0, 0];
   const kill = new Set();
+  let touch = 0;
+  // a walking astronaut moves its feet itself (eva.js); contact friction would only drag it
+  const walking = v.parts.length === 1 && PART[v.parts[0].id].kerbal && v.parts[0].st.walk > 0.05;
+  // points touching this step: friction that can stop the slide within a step is shared between them
+  const pgC = V.scale(V.norm(v.r), b.R + gnd.h);
+  let nc = 0;
+  for (const [rid, pt] of pts) if (!v.parts[rid].dead && V.dot(V.sub(pgC, V.add(v.r, Q.rot(v.q, V.sub(pt, mp.com)))), gnd.n) > 0) nc++;
   for (const [rid, pt, isLeg] of pts) {
     if (v.parts[rid].dead) continue;
     const armL = V.sub(pt, mp.com);
@@ -492,14 +623,23 @@ function groundContact(v, dt, ut, mp, F, tau, hooks, gnd) {
       const d = PART[v.parts[rid].id];
       const tol = (isLeg ? d.legs.crash : d.crash) * (gnd.water ? 1.6 : 1);
       if (-vn > tol) { kill.add(rid); continue; }
+      touch = Math.max(touch, -vn);
     }
     const k = isLeg ? kpt * 0.6 : kpt, c = (isLeg ? cpt * 1.3 : cpt) * (gnd.water ? 1.8 : 1);
     const fn = Math.max(0, k * pen - c * vn);
     const vt = V.sub(vpt, V.scale(n, vn));
     const vtl = V.len(vt);
     let f = V.scale(n, fn);
-    if (vtl > 1e-4) {
-      const ft = gnd.water ? m * 0.6 * vtl / 4 : Math.min(0.9 * fn, m * 2.5 * vtl / 4);
+    if (vtl > 1e-4 && !walking) {
+      // land: Coulomb friction with stiction (holds on slopes up to ~40 deg), sized with the contact point's
+      // effective mass so it settles without rocking; water: viscous
+      let ft;
+      if (gnd.water) ft = m * 0.6 * vtl / 4;
+      else {
+        const tL = Q.invRot(v.q, V.scale(vt, 1 / vtl)), cr = V.cross(armL, tL), I = mp.I;
+        const mEff = 1 / (1 / m + cr[0] * cr[0] / I[0] + cr[1] * cr[1] / I[1] + cr[2] * cr[2] / I[2]);
+        ft = Math.min(0.9 * fn, 0.5 * mEff * vtl / (dt * Math.max(1, nc)));
+      }
       f = V.addS(f, vt, -ft / vtl);
     }
     Fadd[0] += f[0]; Fadd[1] += f[1]; Fadd[2] += f[2];
@@ -509,6 +649,7 @@ function groundContact(v, dt, ut, mp, F, tau, hooks, gnd) {
   F[0] += Fadd[0]; F[1] += Fadd[1]; F[2] += Fadd[2];
   v._contactPrev = now;
   v.splashed = any && gnd.water;
+  if (touch > 0.8 && hooks && hooks.event) hooks.event('touch', { speed: touch, water: !!gnd.water });
   if (kill.size) {
     for (const rid of kill) explodePart(v, rid, hooks, 'удар о поверхность');
   }
@@ -552,6 +693,7 @@ function tickResources(v, dt, ut, active, u, mp) {
     if (p.dead) continue;
     const d = PART[p.id];
     if (d.command && d.command.elecUse) use += d.command.elecUse;
+    if (d.scanner && p.st.scan !== false && active) use += d.scanner.elec;
     if (d.solar && p.st.solar) {
       if (v._sunT == null || ut - v._sunT > 2 || ut < v._sunT) { v._sunF = sunExposure(v.body, v.r, ut); v._sunT = ut; }
       gen += d.solar.rate * v._sunF * (d.shape === 'solarBig' ? 1 : 0.55);
@@ -633,7 +775,7 @@ function extractVessel(v, rids) {
   for (const p of parts) p.pEdge = p.pEdge != null && emap.has(p.pEdge) ? emap.get(p.pEdge) : null;
   const nv = {
     id: 'v' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36),
-    name: v.name + (parts.some(p => PART[p.id].command) ? ' (отделён)' : ' — обломки'),
+    name: (parts.find(p => p.origName && PART[p.id].command) || {}).origName || v.name + (parts.some(p => PART[p.id].command) ? ' (отделён)' : ' — обломки'),
     parts, edges, stages: [], stageIdx: 0, throttle: 0, sas: false, sasMode: 'stab', rcs: false,
     flags: JSON.parse(JSON.stringify(v.flags)), maxAlt: v.maxAlt, design: null,
     body: v.body, q: v.q.slice(), w: v.w.slice(), launchUT: v.launchUT,
@@ -702,7 +844,7 @@ function sciSituation(v) {
 }
 function situationText(v, ut) {
   const b = v.body;
-  if (v.situation === 'PRELAUNCH') return 'Стартовый стол, ' + b.name;
+  if (v.situation === 'PRELAUNCH') return (v.site === 'runway' ? 'Взлётная полоса, ' : 'Стартовый стол, ') + b.name;
   if (v.landed || v.inContact) return 'На поверхности: ' + b.name;
   const alt = V.len(v.r) - b.R;
   if (b.atm && alt < b.atm.top) return 'Полёт в атмосфере: ' + b.name;
@@ -781,6 +923,25 @@ function checkSOI(v, ut) {
     }
   }
   return false;
+}
+
+// place a fresh vessel at the west end of the runway: nose east (+Y), belly down (-Z), lowest wheel on the surface
+function placeOnRunway(v, ut) {
+  const b = BODY.earth;
+  v.body = b;
+  const mp = massProps(v);
+  const upF = V.norm(V.add(V.scale(_KSC_DIR, b.R), V.add(V.scale(_KSC_E, RUNWAY.e0 + 90), V.scale(_KSC_S, RUNWAY.s))));
+  const eastF = V.norm(V.cross([0, 0, 1], upF)), southF = V.neg(V.cross(upF, eastF));
+  let zLow = Infinity;
+  for (const p of v.parts) if (!p.dead && PART[p.id].gear) zLow = Math.min(zLow, wheelCentre(p)[2] - PART[p.id].gear.r);
+  for (const c of vesselGeometry(v).contacts) zLow = Math.min(zLow, c.pt[2]);
+  v.lock = { pf: V.scale(upF, b.R + RUNWAY.h + mp.com[2] - zLow + 0.03), qf: Q.fromBasis(southF, eastF, upF) };
+  v.landed = true;
+  v.prelaunch = true; v.prelaunchHold = false; v.site = 'runway';
+  v.situation = 'PRELAUNCH';
+  v.w = [0, 0, 0];
+  v._comPrev = mp.com.slice();
+  applyLock(v, ut);
 }
 
 // place a fresh vessel on the launch pad (prelaunch, locked)

@@ -158,9 +158,11 @@ function buildVessel(design, name) {
     if (d.engine) p.st.eng = { on: false, out: false };
     if (d.chute) p.st.chute = 'stowed';
     if (d.legs) p.st.legs = false;
+    if (d.gear && d.gear.retract) p.st.gear = true;
     if (d.solar) p.st.solar = true;
     return p;
   });
+  parts.forEach((p, i) => { if (PART[p.id].dock) p.portDir = dockFacing(L, i); });
   const edges = [];
   L.forEach((it, i) => { if (it.parent >= 0) { edges.push({ a: it.parent, b: i, cut: false }); parts[i].pEdge = edges.length - 1; } });
   const byUid = {};
@@ -178,6 +180,26 @@ function buildVessel(design, name) {
 }
 
 function partDef(p) { return PART[p.id]; }
+// ---- part orientation in vessel axes ----
+// Stack parts stand upright, radial parts are turned about +Y by -ang. Parts that joined through a docking
+// port carry an explicit quaternion p.q (they can be upside down or rolled relative to the vessel).
+function partQ(p) { return p.q || (p.dir ? Q.axisAngle([0, 1, 0], -p.ang) : [0, 0, 0, 1]); }
+function partPt(p, local) { return V.add(p.pos, p.q || p.dir ? Q.rot(partQ(p), local) : local); }
+function partAxis(p) { return p.q ? Q.rot(p.q, [0, 1, 0]) : [0, 1, 0]; }
+// which end of a docking port is free (+1 top, -1 bottom, 0 covered), from the stack neighbours' positions.
+// items: layout items or runtime parts (anything with pos and id)
+function dockFacing(items, i) {
+  const it = items[i], d = PART[it.id], top = it.pos[1] + d.h / 2, bot = it.pos[1] - d.h / 2;
+  let up = false, down = false;
+  for (const o of items) {
+    if (o === it || o.dead || PART[o.id].attach !== 'stack') continue;
+    if (Math.abs(o.pos[0] - it.pos[0]) > 0.05 || Math.abs(o.pos[2] - it.pos[2]) > 0.05) continue;
+    const od = PART[o.id];
+    if (Math.abs((o.pos[1] - od.h / 2) - top) < 0.02) up = true;
+    if (Math.abs((o.pos[1] + od.h / 2) - bot) < 0.02) down = true;
+  }
+  return !up ? 1 : !down ? -1 : 0;
+}
 function liveParts(v) { return v.parts.filter(p => !p.dead); }
 
 // recompute root, fuel domains and adjacency after topology changes
@@ -367,9 +389,34 @@ function designMass(design) {
 function designHasCommand(design) { return layoutDesign(design).some(it => it.def.command); }
 function designPartIds(design) { return [...new Set(layoutDesign(design).map(it => it.id))]; }
 
+// ---- craft codes: a design compressed into text (and into links as #craft=...) ----
+const CRAFT_TAG = 'ORB1';
+const b64u = { enc: (u8) => { let s = ''; for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); },
+  dec: (str) => { const s = atob(str.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((str.length + 3) % 4)); const u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u; } };
+async function craftEncode(design) {
+  const d = { name: design.name, stack: design.stack, stages: design.stages, customStages: !!design.customStages, site: design.site, vabY: design.vabY };
+  const raw = new TextEncoder().encode(JSON.stringify(d));
+  if (typeof CompressionStream === 'undefined') return CRAFT_TAG + 'j' + b64u.enc(raw);
+  const z = new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new CompressionStream('deflate-raw'))).arrayBuffer());
+  return CRAFT_TAG + 'z' + b64u.enc(z);
+}
+// accepts a bare code or any text/link containing one; throws on anything that is not a valid design
+async function craftDecode(text) {
+  const m = String(text).match(/ORB1([jz])([A-Za-z0-9_-]+)/);
+  if (!m) throw new Error('нет кода ракеты');
+  let bytes = b64u.dec(m[2]);
+  if (m[1] === 'z') bytes = new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer());
+  const d = JSON.parse(new TextDecoder().decode(bytes));
+  if (!d || !Array.isArray(d.stack) || !d.stack.length) throw new Error('пустая ракета');
+  for (const e of designTemplates(d)) if (!PART[e.t.id] || PART[e.t.id].hidden) throw new Error('неизвестная деталь ' + e.t.id);
+  layoutDesign(d); syncStages(d);
+  d.name = String(d.name || 'Ракета').slice(0, 60);
+  return d;
+}
+
 // ---- stock designs ----
 // spec: array of ids or {id, r:[{sym, y, mount:'dec_r', col:[ids], anchor, part, r:[...]}]}
-function makeDesign(name, spec) {
+function makeDesign(name, spec, extra) {
   const mkGroup = (g, ownerDef) => {
     const grp = { uid: newUid(), sym: g.sym || 1, y: (g.y || 0) * ownerDef.h, ang: (g.ang || 0) * DEG, mount: null, column: [], anchor: g.anchor || 0 };
     if (g.mount) { grp.mount = { uid: newUid(), id: g.mount }; grp.column = (g.col || []).map(c => mkCol(c)); }
@@ -384,7 +431,7 @@ function makeDesign(name, spec) {
     if (typeof s === 'string') return { uid: newUid(), id: s, radial: [] };
     return { uid: newUid(), id: s.id, radial: (s.r || []).map(g => mkGroup(g, PART[s.id])) };
   });
-  const d = { name, stack, stages: [] };
+  const d = Object.assign({ name, stack, stages: [] }, extra || {});
   autoStage(d);
   return d;
 }
@@ -400,6 +447,15 @@ function stockDesigns() {
       { id: 'tank_t1l', r: [{ sym: 4, y: -0.2, part: 'legs' }] }, 'eng_terrier', 'dec_s1',
       'tank_t1xl', 'eng_terrier', 'dec_s1',
       { id: 'tank_t1xl', r: [{ sym: 2, y: 0.1, mount: 'dec_r', col: ['nose_s1', 'srb_kickback'], anchor: 1 }] },
+      { id: 'tank_t1xl', r: [{ sym: 4, y: -0.42, part: 'fin' }] }, 'eng_swivel']),
+    makeDesign('Стриж', [{ id: 'pod_cockpit', r: [{ sym: 1, y: -0.32, ang: -90, part: 'gear_s' }] }, 'tank_t1m',
+      { id: 'tank_t1l', r: [{ sym: 2, y: 0.12, part: 'wing_m' }, { sym: 1, y: 0.07, ang: -70, part: 'gear_s' }, { sym: 1, y: 0.07, ang: -110, part: 'gear_s' },
+        { sym: 1, y: -0.3, ang: 90, part: 'fin_big' }] }, { id: 'jet_basic', r: [{ sym: 2, y: 0.22, part: 'elevon' }] }], { site: 'runway' }),
+    makeDesign('Луноход', [{ id: 'probe_p1', r: [{ sym: 1, y: 0, ang: -30, part: 'wheel_rover' }, { sym: 1, y: 0, ang: -150, part: 'wheel_rover' }] },
+      { id: 'battery_l', r: [{ sym: 2, y: 0, ang: 60, part: 'solar_s' }] },
+      { id: 'tank_t1m', r: [{ sym: 1, y: -0.35, ang: -30, part: 'wheel_rover' }, { sym: 1, y: -0.35, ang: -150, part: 'wheel_rover' }, { sym: 1, y: 0.3, ang: 90, part: 'antenna' }] }], { site: 'runway' }),
+    makeDesign('Стыковщик', ['dock_s', { id: 'pod_k1', r: [{ sym: 4, y: 0.15, part: 'rcs' }, { sym: 2, y: -0.25, ang: 45, part: 'chute_r' }] }, 'shield_s1', 'dec_s1',
+      'mono_s1', 'tank_t1l', 'eng_terrier', 'dec_s1', { id: 'tank_t1xl', r: [{ sym: 2, y: 0.1, mount: 'dec_r', col: ['nose_s1', 'srb_hammer'], anchor: 1 }] },
       { id: 'tank_t1xl', r: [{ sym: 4, y: -0.42, part: 'fin' }] }, 'eng_swivel']),
   ];
 }

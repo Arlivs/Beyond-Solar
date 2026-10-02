@@ -167,17 +167,24 @@ function terrainHeight(b, d, minWave) {
 
 // launch pad deck: the launch site props sit KSC_DECK above the 1 m plateau
 const KSC_DECK = 1.25, KSC_DECK_R = 21;
+// runway south of the pad, KSC local frame (e east, s south, metres); hard surface 1.05 m above the reference radius
+const RUNWAY = { e0: -500, e1: 1100, s: 700, half: 22.5, h: 1.05 };
+function onRunway(d, R) {
+  const o = V.scale(V.sub(d, _KSC_DIR), R), e = V.dot(o, _KSC_E), s = V.dot(o, _KSC_S);
+  return e > RUNWAY.e0 && e < RUNWAY.e1 && Math.abs(s - RUNWAY.s) < RUNWAY.half;
+}
 // physical ground height: liquid surfaces are flat at sea level, the pad deck is solid
 function groundHeight(b, d, minWave) {
   if (b.id === 'earth') {
     const kd = Math.hypot(d[0] - _KSC_DIR[0], d[1] - _KSC_DIR[1], d[2] - _KSC_DIR[2]) * b.R;
     if (kd < KSC_DECK_R) return KSC_DECK;
+    if (kd < 2000 && onRunway(d, b.R)) return RUNWAY.h;
   }
   const h = terrainHeight(b, d, minWave);
   return b.terrain && b.terrain.sea != null ? Math.max(h, b.terrain.sea) : h;
 }
 
-let _KSC_DIR = [1, 0, 0];
+let _KSC_DIR = [1, 0, 0], _KSC_E = [0, 1, 0], _KSC_S = [0, 0, -1];
 (function initTerrain() {
   for (const b of BODIES) {
     b.terrain = terrainSpec(b);
@@ -190,6 +197,7 @@ let _KSC_DIR = [1, 0, 0];
     b.hMax = m;
   }
   _KSC_DIR = V.norm(surfacePoint(BODY.earth, KSC.lat, KSC.lon, 0));
+  _KSC_E = V.norm(V.cross([0, 0, 1], _KSC_DIR)); _KSC_S = V.neg(V.cross(_KSC_DIR, _KSC_E));
 })();
 
 // ground under a world-frame point near the body: {h, n (inertial unit normal), water}

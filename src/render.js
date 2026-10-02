@@ -987,13 +987,23 @@ function buildKSC() {
     dish.rotation.x = -0.9; dish.material = white.clone(); dish.material.side = THREE.DoubleSide;
   }
   // runway south of the pad
-  const runT = siteTex(1024, 64, (x, w, h) => {
-    noiseFill(x, w, h, '#2f3133', 0.12, 3000);
-    x.fillStyle = '#e8e8e8'; for (let i = 0; i < 40; i++) x.fillRect(i * w / 40 + 6, h / 2 - 1, w / 80, 2);
-    x.fillRect(0, 3, w, 2); x.fillRect(0, h - 5, w, 2);
-    for (let i = 0; i < 8; i++) { x.fillRect(10, 8 + i * 6, 40, 3); x.fillRect(w - 50, 8 + i * 6, 40, 3); }
+  // 1600 x 45 m at 2.56 px/m: threshold bars, numbers, touchdown zone, centre line, edge lines
+  const runT = siteTex(4096, 116, (x, w, h) => {
+    noiseFill(x, w, h, '#2e3032', 0.1, 14000);
+    const m = w / (RUNWAY.e1 - RUNWAY.e0);
+    x.fillStyle = 'rgba(230,230,226,0.92)';
+    x.fillRect(0, 2, w, 2); x.fillRect(0, h - 4, w, 2);
+    for (let e = 160; e < 1440; e += 50) x.fillRect(e * m, h / 2 - 1, 30 * m, 2);
+    for (const [e0, dir] of [[6, 1], [1594, -1]]) {
+      for (let i = 0; i < 12; i++) { const y = 8 + i * (h - 16) / 12; x.fillRect((dir > 0 ? e0 : e0 - 30) * m, y, 30 * m, (h - 16) / 24); }
+      for (const off of [150, 300, 450]) for (const yy of [0.22, 0.7]) x.fillRect((dir > 0 ? e0 + off : e0 - off - 22) * m, yy * h, 22 * m, 0.08 * h);
+      x.save(); x.translate((e0 + dir * 60) * m, h / 2); x.rotate(dir > 0 ? -Math.PI / 2 : Math.PI / 2);
+      x.font = `bold ${Math.round(h * 0.5)}px Arial`; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText(dir > 0 ? '09' : '27', 0, 0); x.restore();
+    }
   });
-  add(new THREE.BoxGeometry(1600, 0.3, 45), std({ map: runT, roughness: 0.9 }), 300, 0.05, 700);
+  runT.anisotropy = 16;
+  // top at RUNWAY.h above the reference radius (the deck is the local origin), matching groundHeight
+  add(new THREE.BoxGeometry(RUNWAY.e1 - RUNWAY.e0, 0.3, RUNWAY.half * 2), std({ map: runT, roughness: 0.9 }), (RUNWAY.e0 + RUNWAY.e1) / 2, RUNWAY.h - KSC_DECK - 0.15, RUNWAY.s);
   // trees
   const treeGeo = new THREE.ConeGeometry(4, 13, 7); treeGeo.translate(0, 9, 0);
   const trunkGeo = new THREE.CylinderGeometry(0.6, 0.8, 4, 6); trunkGeo.translate(0, 2, 0);

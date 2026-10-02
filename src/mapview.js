@@ -22,6 +22,22 @@ function initMap(layer) {
     RV.scene.add(line);
     MAP.bodyLines[b.id] = line;
   }
+  // orbit of a target vessel
+  {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(3 * 361), 3));
+    MAP.tgtLine = new THREE.Line(g, new THREE.LineBasicMaterial({ color: 0xff5bd2, transparent: true, opacity: 0.75, depthWrite: false, toneMapped: false }));
+    MAP.tgtLine.frustumCulled = false; MAP.tgtLine.visible = false; MAP.tgtLine.renderOrder = 6;
+    RV.scene.add(MAP.tgtLine);
+  }
+  // predicted descent path through the atmosphere
+  {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(3 * 2100), 3));
+    MAP.impLine = new THREE.Line(g, new THREE.LineBasicMaterial({ color: 0xff7a45, depthWrite: false, toneMapped: false }));
+    MAP.impLine.frustumCulled = false; MAP.impLine.visible = false; MAP.impLine.renderOrder = 6;
+    RV.scene.add(MAP.impLine);
+  }
   for (let i = 0; i < 10; i++) {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(3 * 401), 3));
@@ -36,7 +52,7 @@ function initMap(layer) {
 function mapSetVisible(on) {
   MAP.on = on;
   for (const id in MAP.bodyLines) MAP.bodyLines[id].visible = on;
-  if (!on) { for (const l of MAP.patchLines) l.visible = false; MAP.layer.innerHTML = ''; MAP.labels.clear(); }
+  if (!on) { for (const l of MAP.patchLines) l.visible = false; MAP.tgtLine.visible = false; MAP.impLine.visible = false; MAP.layer.innerHTML = ''; MAP.labels.clear(); }
 }
 
 // focus world position
@@ -146,7 +162,7 @@ function mapUpdate(t, vessel, traj, hooks) {
         const st = elState(el, pt.t1);
         const txt = pt.end === 'enter' ? `Вход: ${pt.next.name}` : `Выход из СВ: ${pt.body.name}`;
         mapLabel('tr' + k, `${txt}<small>${fmtDur(pt.t1 - t, true)}</small>`, projectAbs(V.add(bodyAbs, st.r)), 'soi');
-      } else if (pt.end === 'impact' || pt.end === 'atmo') {
+      } else if ((pt.end === 'impact' || pt.end === 'atmo') && !hooks.impact) {   // the drag-aware prediction replaces it
         const st = elState(el, pt.t1);
         mapLabel('tr' + k, `${pt.end === 'impact' ? 'Падение' : 'Атмосфера'}<small>${fmtDur(pt.t1 - t, true)}</small>`, projectAbs(V.add(bodyAbs, st.r)), 'impact');
       } else mapLabel('tr' + k, '', null);
@@ -160,13 +176,40 @@ function mapUpdate(t, vessel, traj, hooks) {
     const el = mapLabel('node' + i, `<b class="nodeicon"></b><span>Δv ${nd.dvTotal != null ? nd.dvTotal.toFixed(1) : V.len(nd.dv).toFixed(1)} м/с</span>`, xy, 'node' + (hooks.selNode === i ? ' sel' : ''), () => hooks.selectNode(i));
     void el;
   });
+  // other vessels: click to make one the target; the target's orbit is drawn in magenta
+  MAP.tgtLine.visible = false;
+  for (const o of hooks.vessels || []) {
+    if (o === vessel || o.destroyed || o.debris) continue;
+    const isT = hooks.target === 'v:' + o.id;
+    mapLabel('ov_' + o.id, `<b class="vicon"></b><span>${esc(o.name)}</span>`, projectAbs(V.add(bodyAbsPos(o.body, t), o.r)), 'vessel other' + (isT ? ' target' : ''),
+      () => hooks.setTarget && hooks.setTarget('v:' + o.id));
+    if (isT && !o.landed && !o.lock) {
+      const el = elFromState(o.r, o.v, o.body.mu, t), arr = MAP.tgtLine.geometry.attributes.position.array;
+      const lim = el.e < 1 ? Math.PI : Math.min(el.nuInf * 0.98, elNuAtRadius(el, o.body.soi) || el.nuInf * 0.98);
+      for (let i = 0; i <= 360; i++) { const p = elPosAtNu(el, -lim + 2 * lim * i / 360); arr[i * 3] = p[0]; arr[i * 3 + 1] = p[2]; arr[i * 3 + 2] = -p[1]; }
+      MAP.tgtLine.geometry.attributes.position.needsUpdate = true;
+      relT(bodyAbsPos(o.body, t), MAP.tgtLine.position);
+      MAP.tgtLine.visible = true;
+    }
+  }
+  // landing prediction
+  const imp = hooks.impact;
+  MAP.impLine.visible = !!imp;
+  if (imp) {
+    const b = imp.body, arr = MAP.impLine.geometry.attributes.position.array, n = Math.min(imp.pts.length, 2100);
+    for (let i = 0; i < n; i++) { const q = bodyFixedToInertial(b, t, imp.pts[Math.floor(i * imp.pts.length / n)]); arr[i * 3] = q[0]; arr[i * 3 + 1] = q[2]; arr[i * 3 + 2] = -q[1]; }
+    MAP.impLine.geometry.attributes.position.needsUpdate = true; MAP.impLine.geometry.setDrawRange(0, n);
+    relT(bodyAbsPos(b, t), MAP.impLine.position);
+    mapLabel('impact', `✕ Посадка<small>через ${fmtDur(imp.t - t, true)} · ${imp.speed.toFixed(0)} м/с</small>`, projectAbs(V.add(bodyAbsPos(b, t), bodyFixedToInertial(b, t, imp.pF))), 'impact');
+  } else mapLabel('impact', '', null);
   // vessel marker
   if (vessel) mapLabel('vessel', `<b class="vicon"></b><span>${vessel.name}</span>`, projectAbs(V.add(bodyAbsPos(vessel.body, t), vessel.r)), 'vessel', () => hooks.focusVessel());
   // target closest approach
-  if (hooks.closest) {
+  // closest approach (hidden when it is happening right now next to the target marker)
+  if (hooks.closest && hooks.closest.t - t > 1 && !(vessel && hooks.closest.d < 2000 && V.dist(hooks.closest.rv, vessel.r) < 2000)) {
     const c = hooks.closest;
     mapLabel('ca1', `Сближение<small>${fmtDist(c.d)}</small>`, projectAbs(V.add(bodyAbsPos(c.patch.body, t), c.rv)), 'closest');
-    mapLabel('ca2', `${BODY[c.target].name}<small>через ${fmtDur(c.t - t, true)}</small>`, projectAbs(V.add(bodyAbsPos(c.patch.body, t), c.rt)), 'closest');
+    mapLabel('ca2', `${esc(c.name)}<small>через ${fmtDur(c.t - t, true)}${c.relV != null ? ' · ' + fmtSpeed(c.relV) : ''}</small>`, projectAbs(V.add(bodyAbsPos(c.patch.body, t), c.rt)), 'closest');
   } else { mapLabel('ca1', '', null); mapLabel('ca2', '', null); }
   // drop stale labels
   for (const [k, el] of MAP.labels) if (el._seen !== MAP._frame) el.style.display = 'none';
@@ -225,8 +268,28 @@ function closestApproach(traj, targetId) {
       const tt = pt.t0 + span * i / n;
       const rv = elState(pt.el, tt).r, rt = bodyRelState(T, tt).r;
       const d = V.dist(rv, rt);
-      if (!best || d < best.d) best = { d, t: tt, rv, rt, patch: pt, target: targetId };
+      if (!best || d < best.d) best = { d, t: tt, rv, rt, patch: pt, target: targetId, name: T.name };
     }
+  }
+  return best;
+}
+
+// closest approach to a vessel on its current (coasting) orbit: coarse scan + golden-section refine
+function closestApproachVessel(traj, T, t) {
+  if (!traj || !T || T.landed || T.lock) return null;
+  const elT = elFromState(T.r, T.v, T.body.mu, t);
+  let best = null;
+  for (const pt of traj) {
+    if (pt.body !== T.body) continue;
+    const per = Math.max(isFinite(pt.el.T) ? pt.el.T : 0, isFinite(elT.T) ? elT.T : 0) || pt.t1 - pt.t0;
+    const span = Math.min(pt.t1 - pt.t0, per * 1.5), n = 720;
+    const f = (tt) => V.dist(elState(pt.el, tt).r, elState(elT, tt).r);
+    let bi = 0, bd = Infinity;
+    for (let i = 0; i <= n; i++) { const d = f(pt.t0 + span * i / n); if (d < bd) { bd = d; bi = i; } }
+    let lo = pt.t0 + span * Math.max(0, bi - 1) / n, hi = pt.t0 + span * Math.min(n, bi + 1) / n;
+    for (let k = 0; k < 40; k++) { const m1 = lo + (hi - lo) * 0.382, m2 = lo + (hi - lo) * 0.618; if (f(m1) < f(m2)) hi = m2; else lo = m1; }
+    const tb = (lo + hi) / 2, sa = elState(pt.el, tb), sb = elState(elT, tb), d = V.dist(sa.r, sb.r);
+    if (!best || d < best.d) best = { d, t: tb, rv: sa.r, rt: sb.r, patch: pt, name: T.name, relV: V.dist(sa.v, sb.v) };
   }
   return best;
 }

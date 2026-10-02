@@ -108,6 +108,7 @@ function vabRebuild(resetCam) {
     const m = buildPartMesh(it.def);
     m.position.set(it.pos[0], it.pos[1], it.pos[2]);
     if (it.dir) m.rotation.y = -it.ang;
+    if (it.def.dock && dockFacing(VAB.layout, i) < 0) m.rotateX(Math.PI);
     m.traverse(o => { if (o.isMesh) o.userData = { li: i, uid: it.uid }; });
     m.userData = { li: i, uid: it.uid };
     VAB.root.add(m);
@@ -355,7 +356,7 @@ function vabDiscardHeld() {
   const n = VAB.held.kind === 'new' ? 0 : collectUids(VAB.held.kind === 'seg' ? VAB.held.parts : VAB.held.group).size;
   VAB.held = null; VAB.pickSnap = null;
   vabRebuild(); ui.vabPalette();
-  if (n) ui.toast('Удалено деталей: ' + n, '', 1500);
+  if (n) { ui.toast('Удалено деталей: ' + n, '', 1500); sndUi('trash'); }
 }
 
 function vabClick(mx, my, shift, alt) {
@@ -363,6 +364,7 @@ function vabClick(mx, my, shift, alt) {
     if (VAB.placement) {
       if (VAB.held.kind === 'new') vabPush();
       applyPlacement(VAB.design, VAB.placement, heldPayload());
+      sndUi('attach');
       if (!(shift && VAB.held.kind === 'new')) { VAB.held = null; VAB.pickSnap = null; }
       vabRebuild(); ui.vabPalette();
     } else if (!VAB.design.stack.length && heldMode() === 'stack') {
@@ -375,7 +377,7 @@ function vabClick(mx, my, shift, alt) {
   if (!hit) return;
   const uid = hit.object.userData.uid;
   if (uid === rootUid() && !alt) { ui.toast('Корень ракеты: тяните мышью, чтобы поднять или опустить ракету', '', 2200); return; }
-  if (vabPick(uid, alt)) { ui.vabPalette(); vabMouseMove(mx, my); }
+  if (vabPick(uid, alt)) { sndUi('pick'); ui.vabPalette(); vabMouseMove(mx, my); }
 }
 
 // root-part drag: move the rocket vertically on a camera-facing plane

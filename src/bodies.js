@@ -27,11 +27,11 @@ const BODY_DATA = [
 
   { id: 'earth', name: 'Земля', parent: 'sun', gm: 3.986004418e14, r: 6371, rot: 0.99726968,
     jpl: [1.00000261, 0.01671123, 0, 100.46457166, 102.93768193, 0.0],
-    atm: { p0: 101.325, rho0: 1.225, H: 5.6, top: 70, sky: [0.32, 0.55, 1.0] },
+    atm: { p0: 101.325, rho0: 1.225, H: 5.6, top: 70, sky: [0.32, 0.55, 1.0], oxygen: true },
     sci: [0.3, 0.7, 0.9, 1, 1.5], diff: 0, vis: { type: 'earth', c: ['#1d4f8f', '#3f7a3a', '#c9b98a'] } },
 
   { id: 'moon', name: 'Луна', parent: 'earth', gm: 4.9048695e12, r: 1737.4, lock: true,
-    kep: [384399, 0.0549, 5.145, 125.08, 318.15, 135.27],
+    kep: [384748, 0.0549, 5.145, 125.08, 318.15, 135.27],   // a tuned so the two-body period is the real sidereal month (27.3217 d; the Sun stretches it)
     sci: [4, 0, 0, 3, 2], diff: 1, vis: { type: 'rocky', c: ['#a3a19c', '#5c5a57', '#c4c2bd'], crat: 1, maria: 1 } },
 
   { id: 'mars', name: 'Марс', parent: 'sun', gm: 4.282837e13, r: 3389.5, rot: 1.025957,
@@ -128,10 +128,11 @@ const BODY = {};
     };
     b.g0 = b.mu / (b.R * b.R);
     if (d.atm) {
-      b.atm = { p0: d.atm.p0, rho0: d.atm.rho0, H: d.atm.H * 1e3, top: d.atm.top * 1e3, sky: d.atm.sky };
+      b.atm = { p0: d.atm.p0, rho0: d.atm.rho0, H: d.atm.H * 1e3, top: d.atm.top * 1e3, sky: d.atm.sky, oxygen: !!d.atm.oxygen };
     }
     if (b.parent) {
-      const pmu = b.parent.mu;
+      // two-body period uses G(M+m): matters for the Moon (1.2% of Earth), keeps real dates' phases right
+      const pmu = b.parent.mu + b.mu;
       if (d.jpl) {
         const [aAU, e, i, L, lp, node] = d.jpl;
         b.el = elFromKepler(aAU * AU * SCALE_L, e, i, node, lp - node, L - lp, pmu, 0);

@@ -130,6 +130,11 @@ small { color: var(--dim); }
 #hud .sas button { padding: 2px; height: 30px; display: flex; align-items: center; justify-content: center; }
 #hud .sas button img { width: 26px; height: 26px; }
 #hud .sas .full { grid-column: span 2; font-size: 11px; height: 24px; }
+#hud .sas .half { font-size: 10.5px; height: 24px; padding: 0 2px; }
+#hud .dockind { position: fixed; left: calc(50% + 222px); bottom: 10px; width: 176px; padding: 8px 10px; }
+#hud .dockind svg { display: block; margin: 2px auto 4px; }
+#hud .tmark { position: fixed; left: 0; top: 0; pointer-events: none; display: flex; align-items: center; gap: 6px; margin: -9px 0 0 -9px; color: #ff8ae0; font: 11.5px var(--mono); text-shadow: 0 1px 2px #000; }
+#hud .tmark i { width: 14px; height: 14px; border: 2px solid #ff5bd2; border-radius: 50%; box-shadow: 0 0 0 3px rgba(255,91,210,.25); }
 #hud .thr { position: absolute; left: 66px; bottom: 16px; width: 26px; height: 170px; padding: 3px; }
 #hud .thr .fill { position: absolute; left: 3px; right: 3px; bottom: 3px; background: linear-gradient(0deg, #ff9b3a, #ffe08a); border-radius: 3px; }
 #hud .thr .lbl { position: absolute; top: -18px; left: -6px; width: 38px; text-align: center; font: 11px var(--mono); }
@@ -152,6 +157,8 @@ small { color: var(--dim); }
 .mlabel small { display: block; font-size: 10px; }
 .mlabel.vessel { display: flex; align-items: center; gap: 5px; margin: -7px 0 0 -7px; cursor: pointer; color: #9fe8ff; text-shadow: 0 1px 2px #000; }
 .mlabel .vicon { width: 14px; height: 14px; border: 2px solid #37d5ff; transform: rotate(45deg); display: inline-block; background: rgba(55,213,255,.25); }
+.mlabel.vessel.other { color: #c9d4e2; } .mlabel.vessel.other .vicon { width: 11px; height: 11px; border-color: #9aa8bb; background: rgba(154,168,187,.2); }
+.mlabel.vessel.target { color: #ff8ae0; } .mlabel.vessel.target .vicon { border-color: #ff5bd2; background: rgba(255,91,210,.3); }
 .mlabel.node { display: flex; align-items: center; gap: 5px; margin: -8px 0 0 -8px; cursor: pointer; color: #9fc4ff; text-shadow: 0 1px 2px #000; }
 .mlabel .nodeicon { width: 16px; height: 16px; border-radius: 50%; border: 3px solid #3a8cff; display: inline-block; }
 .mlabel.node.sel .nodeicon { border-color: #ffb13a; box-shadow: 0 0 8px #ffb13a; }
@@ -189,3 +196,30 @@ small { color: var(--dim); }
 #help kbd { font-family: var(--mono); background: rgba(255,255,255,.1); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; }
 #help p { margin: 3px 0; break-inside: avoid; }
 .destroyed h2 { color: var(--bad); }
+
+/* astronaut corps */
+#crew .body { position: fixed; left: 16px; right: 16px; top: 64px; bottom: 16px; padding: 14px 16px; }
+.crewt { width: 100%; border-collapse: collapse; font-size: 13px; }
+.crewt th { text-align: left; color: var(--dim); font-weight: 500; font-size: 11px; padding: 4px 8px; border-bottom: 1px solid var(--line); }
+.crewt td { padding: 5px 8px; border-bottom: 1px solid rgba(255,255,255,.04); vertical-align: top; }
+.seats { display: grid; gap: 4px; margin-top: 4px; } .seats select { width: 100%; }
+#hud .sas button.locked { opacity: .35; }
+#hud .imark { position: fixed; left: 0; top: 0; pointer-events: none; display: flex; align-items: center; gap: 6px; margin: -10px 0 0 -8px; color: #ff9a6a; font: 11.5px var(--mono); text-shadow: 0 1px 2px #000; }
+#hud .imark i { font-style: normal; font-size: 18px; color: #ff7a45; }
+.modal.wide { max-width: min(1040px, 96vw); }
+.pkwrap { display: flex; gap: 14px; margin-top: 10px; align-items: flex-start; }
+.pkwrap canvas { width: 640px; max-width: 62vw; height: auto; border-radius: 6px; border: 1px solid var(--line); cursor: crosshair; }
+.pkinfo { width: 290px; font-size: 12.5px; }
+.pkinfo .kv { display: flex; justify-content: space-between; padding: 1px 0; } .pkinfo .kv b { font-family: var(--mono); font-weight: 500; }
+#ksc .card.wide { grid-column: span 2; }
+#ksc .card.wide button { padding: 3px 9px; font-size: 12px; }
+.crewt tr.open td { color: #e8edf4; }
+#hud .smark { position: fixed; left: 0; top: 0; pointer-events: none; margin: -9px 0 0 -6px; color: #ffd34f; font: 11.5px var(--mono); text-shadow: 0 1px 2px #000; white-space: nowrap; }
+#hud .smark i { font-style: normal; margin-right: 5px; }
+/* replay */
+#rpl { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); width: min(1100px, 94vw); display: flex; gap: 8px; align-items: center; padding: 8px 12px; }
+#rpl button { padding: 3px 9px; font-size: 12px; } #rpl .rp-sp, #rpl .rp-cam { display: flex; gap: 3px; }
+#rp-time { font-size: 12px; min-width: 150px; text-align: center; }
+#rp-title { position: fixed; left: 50%; bottom: 62px; transform: translateX(-50%); font: 12px var(--mono); text-shadow: 0 1px 2px #000; }
+body.recording #ui, body.recording #toasts, body.recording #maplayer { display: none; }
+#rec-ind { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); background: rgba(150,20,30,.85); color: #fff; padding: 6px 14px; border-radius: 6px; font: 12px var(--mono); cursor: pointer; z-index: 60; }

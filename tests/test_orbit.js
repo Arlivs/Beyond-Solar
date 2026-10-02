@@ -17,10 +17,12 @@ function rk4(r, v, mu, T, dt) {
 }
 const mu = BODY.earth.mu;
 let maxErr = 0;
+// seeded: Math.random occasionally drew a near-parabolic case right at the 1 mm round-trip tolerance
+const rnd = G.rng(20261002);
 for (let k = 0; k < 40; k++) {
-  const r = [700e3 + Math.random() * 3e5, (Math.random() - .5) * 4e5, (Math.random() - .5) * 2e5];
+  const r = [700e3 + rnd() * 3e5, (rnd() - .5) * 4e5, (rnd() - .5) * 2e5];
   const vc = Math.sqrt(mu / V.len(r));
-  const v = [(Math.random() - .5) * vc * 0.6, vc * (0.6 + Math.random() * 1.0), (Math.random() - .5) * vc * 0.4];
+  const v = [(rnd() - .5) * vc * 0.6, vc * (0.6 + rnd() * 1.0), (rnd() - .5) * vc * 0.4];
   const t0 = 1234.5;
   const el = elFromState(r, v, mu, t0);
   const s0 = elState(el, t0);

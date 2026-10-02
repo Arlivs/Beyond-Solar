@@ -109,12 +109,17 @@ function fmtDur(s, short) {
   else out = `${sec}с`;
   return (neg ? '-' : '') + out;
 }
+// ---- calendar ----
+// Game time 0 is J2000 (1 Jan 2000, 12:00). The planets move on real J2000 elements and the 1:10 system runs
+// sqrt(10) times faster, so one game day is exactly one calendar day: dates match the real sky.
+const J2000_MS = Date.UTC(2000, 0, 1, 12, 0, 0);
+const MONTHS = ['янв', 'фев', 'мар', 'апр', 'мая', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+function utToDate(ut) { return new Date(J2000_MS + ut * Math.sqrt(10) * 1000); }
+function dateToUt(ms) { return (ms - J2000_MS) / 1000 / Math.sqrt(10); }
+function fmtDay(ut) { const d = utToDate(ut); return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`; }
 function fmtDate(ut) {
-  const d = Math.floor(ut / DAY), rem = ut - d * DAY;
-  const y = Math.floor(d / YEAR_DAYS) + 1, dd = (d % YEAR_DAYS) + 1;
-  const h = Math.floor(rem / 3600), m = Math.floor((rem % 3600) / 60), s = Math.floor(rem % 60);
-  const p = (x) => String(x).padStart(2, '0');
-  return `Г${y}, Д${dd}, ${p(h)}:${p(m)}:${p(s)}`;
+  const d = utToDate(ut), p = (x) => String(x).padStart(2, '0');
+  return `${fmtDay(ut)}, ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
 }
 function fmtMoney(x) { return (x < 0 ? '-' : '') + '√' + Math.round(Math.abs(x)).toLocaleString('ru-RU'); }
 function fmtMass(t) { return t < 10 ? t.toFixed(3) + ' т' : t.toFixed(1) + ' т'; }

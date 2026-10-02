@@ -159,6 +159,18 @@ function initMaterials() {
   MAT.solar = texMat('solar', 1, 1, { metalness: 0.4, emissive: 0x020612 });
   MAT.stripe = texMat('stripe', 4, 1, {});
   MAT.canopy = new THREE.MeshStandardMaterial({ map: canvasTex(512, 64, (x, w, h) => { for (let i = 0; i < 12; i++) { x.fillStyle = i % 2 ? '#f2f1ec' : '#e0602a'; x.fillRect(i * w / 12, 0, w / 12, h); } x.fillStyle = 'rgba(0,0,0,0.15)'; x.fillRect(0, h - 4, w, 4); }), side: THREE.DoubleSide, roughness: 0.85 });
+  MAT.tire = std({ color: 0x1b1c1e, roughness: 0.92, metalness: 0.0 });
+  MAT.tread = new THREE.MeshStandardMaterial({ roughness: 0.95, map: canvasTex(256, 64, (x, w, h) => { x.fillStyle = '#1d1e20'; x.fillRect(0, 0, w, h); x.fillStyle = '#0c0d0e'; for (let i = 0; i < 24; i++) { x.fillRect(i * w / 24, 0, w / 48, h * 0.45); x.fillRect(i * w / 24 + w / 48, h * 0.55, w / 48, h * 0.45); } }) });
+  MAT.suit = std({ color: 0xefeee8, roughness: 0.68, metalness: 0.0 });
+  MAT.visor = std({ color: 0xd9a441, metalness: 1.0, roughness: 0.1, envMapIntensity: 1.6 });
+  MAT.flag = new THREE.MeshStandardMaterial({ side: THREE.DoubleSide, roughness: 0.8, map: canvasTex(512, 320, (x, w, h) => {
+    x.fillStyle = '#16337a'; x.fillRect(0, 0, w, h);
+    x.fillStyle = '#c8352b'; x.fillRect(0, h * 0.78, w, h * 0.22);
+    x.strokeStyle = '#f2f0ea'; x.lineWidth = 9; x.beginPath(); x.ellipse(w * 0.34, h * 0.4, w * 0.2, h * 0.17, -0.35, 0, TAU); x.stroke();
+    x.fillStyle = '#f2f0ea'; x.beginPath(); x.arc(w * 0.34, h * 0.4, 30, 0, TAU); x.fill();
+    x.fillStyle = '#ffc94a'; x.beginPath(); x.arc(w * 0.51, h * 0.27, 13, 0, TAU); x.fill();
+    x.fillStyle = '#f2f0ea'; x.font = 'bold 56px Arial'; x.textAlign = 'left'; x.fillText('ОРБИТА', w * 0.58, h * 0.47);
+  }) });
   // bell: steel near the throat, heat-tinted bronze/blue toward the exit (vertex colours)
   MAT.bell = std({ color: 0xffffff, vertexColors: true, metalness: 0.92, roughness: 0.32, side: THREE.DoubleSide });
 }
@@ -301,6 +313,96 @@ function buildPartMesh(def) {
       add(cyl(rb, rb, h * 0.16, 32), MAT.dark, 0, -h * 0.42);
       break;
     }
+    case 'cockpit': {
+      // ogive nose with a glazed canopy on top (+Z); the stack runs nose-up in the hall, nose-forward in flight
+      add(ogive(rb, h), texMat('white', 3, 1));
+      const can = add(new THREE.SphereGeometry(rb * 0.62, 32, 16, 0, TAU, 0, Math.PI / 2), MAT.glass, 0, h * 0.02, rb * 0.5);
+      can.rotation.x = Math.PI / 2; can.scale.set(1, 0.72, 1.9);
+      add(new THREE.TorusGeometry(rb * 0.6, 0.025, 8, 40), MAT.dark, 0, h * 0.02, rb * 0.5).scale.set(1, 1.9, 1);
+      add(cyl(rb * 1.004, rb * 1.004, h * 0.035, 48), MAT.dark, 0, -h * 0.482);
+      add(cyl(0.012, 0.016, h * 0.18, 8), MAT.steel, 0, h * 0.58);
+      add(new THREE.BoxGeometry(rb * 1.6, h * 0.05, 0.02), MAT.orange, 0, -h * 0.3, rb * 0.62).rotation.x = -0.25;
+      break;
+    }
+    case 'wing': case 'elevon': {
+      // trapezoid in the part's X (span, outward) / Y (chord) plane, extruded along Z (the lift normal)
+      const span = def.depth, ch = def.h, el = def.shape === 'elevon';
+      const sw = def.sweep != null ? def.sweep : el ? 0.15 : 0.35, tip = ch * (el ? 0.8 : def.sweep ? 0.12 : 0.42);
+      const s2 = new THREE.Shape();
+      s2.moveTo(0, ch / 2); s2.lineTo(span, ch / 2 - sw * ch); s2.lineTo(span, ch / 2 - sw * ch - tip); s2.lineTo(0, -ch / 2); s2.closePath();
+      const geo = new THREE.ExtrudeGeometry(s2, { depth: def.w, bevelEnabled: true, bevelThickness: def.w * 0.35, bevelSize: def.w * 0.3, bevelSegments: 2 });
+      geo.translate(-span / 2, 0, -def.w / 2);
+      const m = new THREE.Mesh(geo, el ? MAT.gray : MAT.white);
+      if (el) { const flap = new THREE.Group(); flap.name = 'flap'; flap.position.y = ch / 2; m.position.y = -ch / 2; flap.add(m); g.add(flap); }
+      else g.add(m);
+      break;
+    }
+    case 'gear': case 'roverWheel': {
+      const G = def.gear, rover = def.shape === 'roverWheel';
+      add(new THREE.BoxGeometry(def.depth, def.h * 0.6, def.w * 0.8), MAT.dark);
+      const leg = new THREE.Group(); leg.name = 'gearleg'; leg.position.x = def.depth / 2; g.add(leg);
+      const strut = new THREE.Mesh(cyl(rover ? 0.045 : 0.05, rover ? 0.045 : 0.05, G.reach, 10), MAT.steel); strut.rotation.z = -Math.PI / 2; strut.position.x = G.reach / 2; leg.add(strut);
+      const oleo = new THREE.Mesh(cyl(0.075, 0.075, G.reach * 0.4, 10), MAT.dark); oleo.rotation.z = -Math.PI / 2; oleo.position.x = G.reach * 0.3; leg.add(oleo);
+      const wheel = new THREE.Group(); wheel.name = 'wheel'; wheel.position.x = G.reach; leg.add(wheel);
+      const spin = new THREE.Group(); spin.name = 'spin'; wheel.add(spin);
+      const tireW = rover ? G.r * 0.75 : G.r * 0.7;
+      const tire = new THREE.Mesh(cyl(G.r, G.r, tireW, 28), rover ? [MAT.tread, MAT.tire, MAT.tire] : MAT.tire); tire.rotation.x = Math.PI / 2; spin.add(tire);
+      const hub = new THREE.Mesh(cyl(G.r * 0.55, G.r * 0.55, tireW * 1.06, 16), rover ? MAT.gold : MAT.steel); hub.rotation.x = Math.PI / 2; spin.add(hub);
+      for (let i = 0; i < 5; i++) { const sp = new THREE.Mesh(new THREE.BoxGeometry(G.r * 0.9, 0.03, tireW * 1.1), MAT.dark); sp.rotation.z = i * TAU / 10; spin.add(sp); }
+      break;
+    }
+    case 'jet': {
+      add(cyl(rt * 0.98, rb * 0.9, h * 0.7, 48), texMat('metal', 3, 2, { metalness: 0.8 }), 0, h * 0.13);
+      add(cyl(rt, rt, h * 0.06, 48), MAT.dark, 0, h * 0.47);
+      for (const y of [0.3, 0.05, -0.15]) add(cyl(rt * 0.99, rt * 0.99, 0.03, 48), MAT.gray, 0, h * y);
+      const bm = MAT.bell.clone(); bm.emissive = new THREE.Color(0xff5a1a); bm.emissiveIntensity = 0;
+      const bell = add(bellGeo(rb * 0.62, rb * 0.5, h * 0.3), bm, 0, -h * 0.22); bell.name = 'bell';
+      add(cyl(rb * 0.35, rb * 0.35, 0.02, 24), MAT.black, 0, -h * 0.3);
+      break;
+    }
+    case 'kerbal': {
+      // astronaut, facing +Z; limbs are named groups for the walk cycle
+      const limb = (name, x, y, r, len, mat, tip) => {
+        const grp = new THREE.Group(); grp.name = name; grp.position.set(x, y, 0); g.add(grp);
+        const m = new THREE.Mesh(new THREE.CapsuleGeometry(r, len, 6, 12), mat); m.position.y = -(len / 2 + r * 0.6); grp.add(m);
+        if (tip) { const t = new THREE.Mesh(tip.geo, tip.mat); t.position.set(0, -(len + r * 1.5), tip.z || 0); grp.add(t); }
+        return grp;
+      };
+      limb('legL', -0.085, -0.17, 0.068, 0.3, MAT.suit, { geo: new THREE.BoxGeometry(0.13, 0.09, 0.2), mat: MAT.dark, z: 0.03 });
+      limb('legR', 0.085, -0.17, 0.068, 0.3, MAT.suit, { geo: new THREE.BoxGeometry(0.13, 0.09, 0.2), mat: MAT.dark, z: 0.03 });
+      limb('armL', -0.215, 0.24, 0.052, 0.28, MAT.suit, { geo: new THREE.SphereGeometry(0.058, 12, 8), mat: MAT.dark });
+      limb('armR', 0.215, 0.24, 0.052, 0.28, MAT.suit, { geo: new THREE.SphereGeometry(0.058, 12, 8), mat: MAT.dark });
+      add(new THREE.CapsuleGeometry(0.15, 0.2, 8, 16), MAT.suit, 0, 0.05).scale.set(1.12, 1, 0.86);
+      for (const sx of [-1, 1]) add(new THREE.BoxGeometry(0.07, 0.05, 0.12), MAT.orange, sx * 0.17, 0.29, 0);
+      add(new THREE.CylinderGeometry(0.1, 0.12, 0.05, 16), MAT.dark, 0, 0.3);
+      add(new THREE.SphereGeometry(0.165, 24, 16), MAT.suit, 0, 0.45);
+      add(new THREE.SphereGeometry(0.168, 24, 16, Math.PI / 2 - 0.95, 1.9, 0.62, 1.15), MAT.visor, 0, 0.45);
+      add(new THREE.BoxGeometry(0.31, 0.4, 0.15), MAT.gray, 0, 0.1, -0.2);
+      for (const sx of [-1, 1]) add(cyl(0.025, 0.035, 0.06, 10), MAT.dark, sx * 0.11, -0.12, -0.24);
+      break;
+    }
+    case 'flag': {
+      add(cyl(0.022, 0.026, h, 10), MAT.steel);
+      add(new THREE.SphereGeometry(0.04, 12, 8), MAT.gold, 0, h / 2 + 0.02);
+      const rod = add(cyl(0.012, 0.012, 1.15, 8), MAT.steel, 0.575, h / 2 - 0.06); rod.rotation.z = Math.PI / 2;
+      const cloth = add(new THREE.PlaneGeometry(1.1, 0.7, 14, 6), MAT.flag, 0.58, h / 2 - 0.42); cloth.name = 'cloth';
+      add(cyl(0.12, 0.16, 0.05, 12), MAT.dark, 0, -h / 2 + 0.025);
+      break;
+    }
+    case 'dock': {
+      // collar + face ring + three guide petals; the face (+Y) is the docking end
+      add(cyl(rt * 0.98, rb, h * 0.55, 48), MAT.gray, 0, -h * 0.225);
+      add(cyl(rt * 0.86, rt * 0.94, h * 0.3, 48), MAT.dark, 0, h * 0.2);
+      add(cyl(rt * 0.8, rt * 0.8, 0.02, 48), MAT.steel, 0, h * 0.36);
+      add(new THREE.TorusGeometry(rt * 0.82, Math.max(0.018, rt * 0.045), 10, 48), MAT.dark, 0, h * 0.37).rotation.x = Math.PI / 2;
+      for (let i = 0; i < 3; i++) {
+        const a = i / 3 * TAU, pet = new THREE.Mesh(new THREE.BoxGeometry(rt * 0.36, h * 0.5, 0.025), MAT.white);
+        const holder = new THREE.Group(); holder.rotation.y = -a; g.add(holder);
+        pet.position.set(rt * 0.62, h * 0.48, 0); pet.rotation.z = -0.35; holder.add(pet);
+        const tip = new THREE.Mesh(new THREE.BoxGeometry(rt * 0.12, h * 0.1, 0.03), MAT.orange); tip.position.set(rt * 0.72, h * 0.7, 0); holder.add(tip);
+      }
+      break;
+    }
     case 'shield': add(cyl(rt, rb, h * 0.7, 64), MAT.shield, 0, -h * 0.15); add(cyl(rt * 1.003, rt * 1.003, h * 0.3, 64), MAT.dark, 0, h * 0.35); break;
     case 'wheel': add(cyl(rt, rb, h, 48), MAT.gray); add(new THREE.TorusGeometry(rt * 0.8, 0.035, 8, 48), MAT.dark, 0, 0, 0).rotation.x = Math.PI / 2; add(cyl(rt * 1.01, rt * 1.01, h * 0.25, 48), MAT.dark); break;
     case 'batteryStack': add(cyl(rt, rb, h, 32), MAT.dark); add(cyl(rt * 1.01, rt * 1.01, h * 0.3, 32), MAT.gold); break;
@@ -347,6 +449,13 @@ function buildPartMesh(def) {
       add(new THREE.TorusGeometry(def.depth / 2, 0.02, 6, 24), MAT.dark, 0, def.h * 0.45).rotation.x = Math.PI / 2;
       break;
     }
+    case 'scanner': {
+      add(new THREE.BoxGeometry(def.depth * 0.6, def.h, def.w), MAT.gold, -def.depth * 0.1, 0, 0);
+      const lens = add(cyl(def.w * 0.32, def.w * 0.4, def.depth * 0.5, 24), MAT.dark, def.depth * 0.3, 0, 0); lens.rotation.z = -Math.PI / 2;
+      const gl = add(cyl(def.w * 0.26, def.w * 0.26, 0.02, 24), MAT.glass, def.depth * 0.56, 0, 0); gl.rotation.z = -Math.PI / 2;
+      add(cyl(0.008, 0.008, def.h * 0.9, 6), MAT.steel, -def.depth * 0.1, def.h * 0.75, def.w * 0.3);
+      break;
+    }
     case 'sci': default: {
       const col = { temperature: MAT.red, pressure: MAT.blue, seismic: MAT.orange, gravity: MAT.gold, atmosphere: MAT.green }[def.sci] || MAT.gray;
       add(new THREE.BoxGeometry(def.depth, def.h, def.w), texMat('white', 1, 1));
@@ -354,6 +463,30 @@ function buildPartMesh(def) {
     }
   }
   g.traverse(o => { if (o.isMesh) { o.renderOrder = 5; o.castShadow = true; o.receiveShadow = true; } });
+  return g;
+}
+
+// historic landers at their sites (+Y up, origin on the ground)
+function buildSiteMesh(s) {
+  const g = new THREE.Group();
+  const add = (geo, mat, x, y, z) => { const m = new THREE.Mesh(geo, mat); m.position.set(x || 0, y || 0, z || 0); m.castShadow = true; m.receiveShadow = true; g.add(m); return m; };
+  const legs = (r, h, n) => { for (let i = 0; i < n; i++) { const a = i / n * TAU + Math.PI / n, l = add(cyl(0.04, 0.04, h * 1.5, 8), MAT.steel, Math.cos(a) * r * 0.8, h * 0.55, Math.sin(a) * r * 0.8); l.rotation.set(Math.sin(a) * 0.5, 0, -Math.cos(a) * 0.5); add(cyl(0.22, 0.26, 0.05, 12), MAT.dark, Math.cos(a) * r * 1.35, 0.03, Math.sin(a) * r * 1.35); } };
+  if (s.id.startsWith('apollo')) {
+    // descent stage: an octagon in gold foil on four legs, the flag beside it
+    add(cyl(2.1, 2.1, 1.6, 8), MAT.gold, 0, 1.8); add(cyl(1.6, 2.1, 0.25, 8), MAT.dark, 0, 1.0);
+    legs(2.1, 1.4, 4);
+    const f = buildPartMesh(PART.flag); f.position.set(4.5, PART.flag.h / 2, 1.5); g.add(f);
+  } else if (s.id.startsWith('lunokhod')) {
+    add(cyl(1.0, 0.8, 0.9, 24), MAT.gray, 0, 1.0); const lid = add(cyl(1.15, 1.15, 0.06, 24), MAT.solar, 0.4, 1.6, 0); lid.rotation.z = 0.9;
+    for (let i = 0; i < 4; i++) for (const sz of [-1, 1]) { const w = add(cyl(0.26, 0.26, 0.18, 16), MAT.dark, -1.05 + i * 0.7, 0.26, sz * 1.0); w.rotation.x = Math.PI / 2; }
+    add(cyl(0.01, 0.01, 1.2, 6), MAT.steel, -0.6, 2.0, 0.4);
+  } else {
+    // generic lander: a squat body on petals / legs with an antenna mast
+    add(new THREE.SphereGeometry(0.6, 20, 14), MAT.gold, 0, 0.95); add(cyl(0.9, 1.0, 0.35, 16), MAT.dark, 0, 0.45);
+    for (let i = 0; i < 4; i++) { const a = i * Math.PI / 2, p = add(new THREE.BoxGeometry(1.2, 0.03, 0.6), MAT.white, Math.cos(a) * 1.1, 0.25, Math.sin(a) * 1.1); p.rotation.y = -a; p.rotation.z = Math.cos(a) * 0.25; p.rotation.x = Math.sin(a) * 0.25; }
+    add(cyl(0.012, 0.012, 1.6, 6), MAT.steel, 0.3, 2.1, 0); add(new THREE.SphereGeometry(0.35, 16, 8, 0, TAU, 0, 1.0), MAT.white, -0.4, 1.55, 0).rotation.z = 0.6;
+  }
+  g.traverse(o => { if (o.isMesh) o.renderOrder = 5; });
   return g;
 }
 
@@ -414,6 +547,7 @@ function plumeMaterial(kind) {
     ion: [[0.25, 0.45, 1.0], [0.75, 0.85, 1.0]],
     nuclear: [[1.0, 0.55, 0.6], [1.0, 0.9, 0.95]],
     plasma: [[1.0, 0.38, 0.15], [1.0, 0.8, 0.6]],
+    jet: [[0.85, 0.42, 0.22], [1.0, 0.75, 0.5]],
   }[kind];
   return new THREE.ShaderMaterial({
     uniforms: { uColor: { value: new THREE.Vector3(...cols[0]).multiplyScalar(3) }, uCore: { value: new THREE.Vector3(...cols[1]).multiplyScalar(6) },
@@ -448,17 +582,20 @@ class VesselView {
       const d = PART[p.id];
       const m = buildPartMesh(d);
       m.position.set(p.pos[0], p.pos[1], p.pos[2]);
-      if (p.dir) m.rotation.y = -p.ang;
+      if (p.q) m.quaternion.set(p.q[0], p.q[1], p.q[2], p.q[3]);
+      else if (p.dir) m.rotation.y = -p.ang;
+      if (d.dock && p.portDir < 0) m.rotateX(Math.PI);   // the port opens downward
       this.group.add(m);
       this.parts.set(p.rid, m);
       if (d.engine) {
-        const kind = d.engine.prop === 'SOLID' ? 'solid' : d.engine.prop === 'XENON' ? 'ion' : d.shape === 'nuclear' ? 'nuclear' : 'liquid';
+        const kind = d.engine.air ? 'jet' : d.engine.prop === 'SOLID' ? 'solid' : d.engine.prop === 'XENON' ? 'ion' : d.shape === 'nuclear' ? 'nuclear' : 'liquid';
         const rr = (d.dBot / 2) * (d.engine.prop === 'SOLID' ? 0.62 : (d.bell || 0.85)) * 0.95;
         const outer = new THREE.Mesh(plumeGeo(), plumeMaterial(kind));
         const core = new THREE.Mesh(plumeGeo(), plumeMaterial(kind));
         core.material.uniforms.uColor.value.multiplyScalar(0.6);
         const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: nozzleGlowTex(), blending: THREE.AdditiveBlending, depthWrite: false, transparent: true }));
-        for (const o of [outer, core, sprite]) { o.position.set(p.pos[0], p.pos[1] - d.h / 2, p.pos[2]); o.visible = false; o.renderOrder = 8; o.frustumCulled = false; this.group.add(o); }
+        const ex = partPt(p, [0, -d.h / 2, 0]), pq = partQ(p);
+        for (const o of [outer, core, sprite]) { o.position.set(ex[0], ex[1], ex[2]); o.quaternion.set(pq[0], pq[1], pq[2], pq[3]); o.visible = false; o.renderOrder = 8; o.frustumCulled = false; this.group.add(o); }
         this.plumes.push({ p, outer, core, sprite, rr, kind, heat: 0, bell: m.getObjectByName('bell'), grid: m.getObjectByName('iongrid') });
       }
       if (d.chute) {
@@ -486,7 +623,8 @@ class VesselView {
       const e = pl.p.st.eng;
       if (pl.p.dead || !e || !e.on || e.out || !(e.thr > 0.01)) continue;
       const d = PART[pl.p.id];
-      x += pl.p.pos[0]; y += pl.p.pos[1] - d.h / 2 - 1.5; z += pl.p.pos[2]; n++; thr += e.thr * d.engine.thrust;
+      const c = partPt(pl.p, [0, -d.h / 2 - 1.5, 0]);
+      x += c[0]; y += c[1]; z += c[2]; n++; thr += e.thr * d.engine.thrust;
     }
     return n ? { pos: [x / n, y / n, z / n], thrust: thr } : null;
   }
@@ -501,6 +639,34 @@ class VesselView {
       if (!m) continue;
       m.visible = !p.dead;
       if (p.dead) { if (m.userData.canopy) m.userData.canopy.visible = false; continue; }
+      if (PART[p.id].kerbal) {
+        // walk cycle while walking, relaxed limbs while floating
+        const sp = p.st.walk || 0;
+        p._ph = (p._ph || 0) + sp * (dt || 0.016) * 5.5;
+        const sw = Math.min(1, sp / 1.2), s = Math.sin(p._ph);
+        const ln = m.getObjectByName('legL'), rn = m.getObjectByName('legR'), la = m.getObjectByName('armL'), ra = m.getObjectByName('armR');
+        const fl = v.inContact || v.lock ? 0 : 1;
+        ln.rotation.x = s * 0.55 * sw + 0.2 * fl; rn.rotation.x = -s * 0.55 * sw + 0.1 * fl;
+        la.rotation.x = -s * 0.45 * sw - 0.1 * fl; ra.rotation.x = s * 0.45 * sw - 0.1 * fl;
+        la.rotation.z = -0.12 - 0.25 * fl; ra.rotation.z = 0.12 + 0.25 * fl;
+      }
+      if (PART[p.id].gear) {
+        // retract (fold towards the nose), suspension travel, wheel spin from the ground speed
+        const G = PART[p.id].gear, leg = m.getObjectByName('gearleg'), wh = m.getObjectByName('wheel'), sp = m.getObjectByName('spin');
+        p._gr = lerp(p._gr == null ? (p.st.gear === false ? 1 : 0) : p._gr, p.st.gear === false ? 1 : 0, 0.06);
+        leg.rotation.z = p._gr * 1.45;
+        wh.position.x = G.reach - (p._comp || 0);
+        if (v.inContact) { const gs = V.dot(V.sub(v.v, V.cross(bodyOmega(v.body), v.r)), Q.rot(v.q, [0, 1, 0])); p._spin = (p._spin || 0) - gs * (dt || 0.016) / G.r; }
+        sp.rotation.z = p._spin || 0;
+      }
+      if (PART[p.id].wing && PART[p.id].wing.ctrl) { const fl = m.getObjectByName('flap'); fl.rotation.x = lerp(fl.rotation.x, (p._defl || 0) * PART[p.id].wing.ctrl * DEG, 0.3); }
+      if (PART[p.id].flag) {
+        // cloth waves in an atmosphere, hangs from the rod in vacuum
+        const cl = m.getObjectByName('cloth'), pa = cl.geometry.attributes.position, wind = clamp((atmP || 0) * 3, 0, 1);
+        if (!cl.userData.x0) cl.userData.x0 = Float32Array.from({ length: pa.count }, (_, i) => pa.getX(i));
+        for (let i = 0; i < pa.count; i++) { const x = cl.userData.x0[i] + 0.55; pa.setZ(i, wind * x * 0.12 * Math.sin(x * 6 - t * 4.5 + pa.getY(i) * 2)); }
+        pa.needsUpdate = true;
+      }
       if (p.st.legs != null) {
         const leg = m.getObjectByName('leg');
         if (leg) { p._legA = lerp(p._legA || 0, p.st.legs ? 1 : 0, 0.08); leg.rotation.z = -lerp(0.05, 0.55, p._legA); }
@@ -530,7 +696,7 @@ class VesselView {
       pl.outer.visible = pl.core.visible = pl.sprite.visible = on && !p.dead;
       if (!on) continue;
       const vac = 1 - pAtm;
-      const base = pl.kind === 'ion' ? 4 : pl.kind === 'solid' ? 11 : 7;
+      const base = pl.kind === 'ion' ? 4 : pl.kind === 'solid' ? 11 : pl.kind === 'jet' ? 3 : 7;
       // short and dense at sea level, long and faint in vacuum
       const len = base * (0.45 + 0.55 * thr) * (1 + vac * 1.6) * (pl.rr * 1.4 + 0.35);
       for (const [mesh, k, lenK, iK] of [[pl.outer, 1, 1, 0.45], [pl.core, 0.5, 0.42, 0.7]]) {
@@ -538,11 +704,12 @@ class VesselView {
         u.uT.value = t; u.uThr.value = thr; u.uP.value = pAtm * (pl.kind === 'ion' ? 0 : 1);
         u.uExp.value = (pl.kind === 'ion' ? 1.3 : lerp(0.7, 3.4, vac)) * (k === 1 ? 1 : 0.8);
         u.uLen.value = len * lenK; u.uR0.value = pl.rr * k;
-        u.uI.value = (pl.kind === 'ion' ? 0.6 : 1) * iK * lerp(0.55, 1.0, pAtm);
+        u.uI.value = (pl.kind === 'ion' ? 0.6 : pl.kind === 'jet' ? 0.3 : 1) * iK * lerp(0.55, 1.0, pAtm);
       }
-      const s = pl.rr * (3.5 + thr * 2);
+      const jk = pl.kind === 'jet' ? 0.35 : 1;                       // a turbine nozzle glows, it does not blaze
+      const s = pl.rr * (3.5 + thr * 2) * (pl.kind === 'jet' ? 0.6 : 1);
       pl.sprite.scale.set(s, s, 1);
-      pl.sprite.material.color.setRGB(3 * thr, 2.4 * thr, 1.8 * thr);
+      pl.sprite.material.color.setRGB(3 * thr * jk, 2.4 * thr * jk, 1.8 * thr * jk);
     }
   }
 }

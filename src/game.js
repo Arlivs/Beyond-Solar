@@ -12,13 +12,19 @@ const Game = {
 function boot() {
   const canvas = document.getElementById('c');
   try { initRenderer(canvas); } catch (e) { document.body.innerHTML = '<p style="color:#fff;padding:40px">WebGL недоступен: ' + e.message + '</p>'; return; }
-  initMaterials(); initFX(); initNavball(); initMap(document.getElementById('maplayer')); initVAB();
+  initMaterials(); initFX(); initNavball(); initMap(document.getElementById('maplayer')); initVAB(); initAudio();
   ui.init();
   setupInput(canvas);
   window.addEventListener('beforeunload', (e) => { if (Game.screen === 'flight') { e.preventDefault(); e.returnValue = ''; } });
   Game.toMenu();
   Game.last = performance.now();
   requestAnimationFrame(loop);
+  // a craft link (#craft=...) opens the rocket in a sandbox
+  if (/craft=ORB1/.test(location.hash)) craftDecode(location.hash).then(d => {
+    history.replaceState(null, '', location.href.split('#')[0]);
+    ui.modal('Ракета по ссылке', `<p>«${esc(d.name)}» · ${layoutDesign(d).length} деталей · ${fmtMoney(designCost(d))}</p>`, [
+      { label: 'Открыть в песочнице', cls: 'acc', onClick: () => { Game.newGame('sandbox'); Game.openVAB(d); } }, { label: 'Отмена' }]);
+  }).catch(e => ui.toast('Ссылка на ракету повреждена: ' + esc(e.message), 'bad'));
 }
 
 function loop(now) {
@@ -27,12 +33,14 @@ function loop(now) {
   Game.last = now;
   try {
     adaptResolution(dt);
+    sndFrame(Game.screen);
     switch (Game.screen) {
       case 'menu': renderMenuBg(now); break;
       case 'ksc': case 'rnd': case 'mc': renderKscBg(); break;
       case 'vab': vabRender(); break;
       case 'flight': flightFrame(dt); break;
       case 'track': trackFrame(dt); break;
+      case 'replay': replayFrame(dt); break;
     }
   } catch (e) {
     console.error(e);
@@ -87,6 +95,7 @@ function hideFlightObjects() {
   if (Game.world) for (const vw of Game.world.views.values()) vw.group.visible = false;
   for (const l of MAP.patchLines) l.visible = false;
   for (const id in MAP.bodyLines) MAP.bodyLines[id].visible = false;
+  for (const m of (RV.siteMeshes || new Map()).values()) m.visible = false;
   FX.list.length = 0; fxUpdate(0);
 }
 
@@ -96,13 +105,36 @@ Game.toMenu = function () {
   Game.screen = 'menu';
   ui.menu();
 };
-Game.newGame = function (mode) {
-  Game.g = newGame(mode);
+Game.newGame = function (mode, opts) {
+  Game.g = newGame(mode, null, opts);
   Game.g._notify = (m) => ui.toast(m, 'acc', 5000);
   Game.autosave();
   Game.toKSC();
-  ui.toast(mode === 'career' ? 'Карьера начата. Загляните в ЦУП за контрактами и в цех — соберите первую ракету.' : 'Песочница: все детали открыты.', 'good', 6000);
+  ui.toast(opts && opts.race ? `${fmtDay(Game.g.ut)}. Космическая гонка началась: ${RIVAL} идёт по настоящей хронологии. Ракеты собираются не мгновенно — следите за календарём.` :
+    mode === 'career' ? 'Карьера начата. Загляните в ЦУП за контрактами и в цех — соберите первую ракету.' : 'Песочница: все детали открыты.', 'good', 7000);
 };
+Game.raceNews = function () {
+  for (const it of raceTick(Game.g)) ui.toast(`Новости: ${RIVAL} — ${it.title.toLowerCase()} (${fmtDay(it.ut)})`, 'bad', 7000);
+};
+// jump the calendar forward (waiting for a build): every vessel moves on rails, scanners map, contracts expire
+Game.skipTo = function (t1) {
+  const g = Game.g; if (!(t1 > g.ut)) return;
+  const a = nextAlarm(null, g.ut); if (a && a.t < t1) { t1 = a.t; fireAlarm(a, false); }
+  const vs = g.vessels.map(s => { try { return deserializeVessel(s); } catch (e) { return null; } }).filter(Boolean);
+  for (const v of vs) {
+    enterRails(v, g.ut);
+    let tt = g.ut;
+    for (let k = 0; k < 40 && tt < t1; k++) { const r = railsAdvance(v, tt, t1); if (r.event === 'impact') { v.destroyed = true; break; } if (!r.event) break; tt = r.t; }
+  }
+  scanAll(vs, g.ut, t1);
+  for (const v of vs) if (v.destroyed) loseCrew(v.parts);
+  g.vessels = vs.filter(v => !v.destroyed).map(serializeVessel);
+  g.ut = t1;
+  for (const c of [...((isCareer(g) && g.contracts.active) || [])]) if (g.ut > c.deadline) { cancelContract(g, c.id); ui.toast('Контракт провален (срок): ' + esc(c.title), 'bad', 5000); }
+  Game.raceNews();
+  Game.autosave();
+};
+
 Game.toKSC = function () {
   Game.leaveWorld();
   mapSetVisible(false);
@@ -165,10 +197,13 @@ Game.onEvent = function (v, type, d) {
       const mp = massProps(v);
       const abs = V.add(V.add(bodyAbsPos(v.body, t), v.r), Q.rot(v.q, V.sub(p.pos, mp.com)));
       fxExplosion(abs, V.add(bodyAbsState(v.body, t).v, v.v), clamp(PART[p.id].mass * 1.5 + 0.6, 0.6, 3));
+      sndAt('explosion', abs, { size: clamp(PART[p.id].mass * 1.5 + 0.6, 0.6, 3), vessel: v });
       if (v === A) ui.toast(`Разрушено: ${esc(PART[p.id].name)} (${esc(d.why)})`, 'bad');
+      loseCrew([p]);
       break;
     }
     case 'destroyed':
+      loseCrew(v.parts);
       if (v === A) { W.lostActive = true; setTimeout(() => ui.destroyed(d.why), 900); }
       break;
     case 'launch':
@@ -177,33 +212,49 @@ Game.onEvent = function (v, type, d) {
       { const m = milestone(g, 'launch'); if (m) ui.toast(`Достижение: ${m.title}`, 'acc'); }
       break;
     case 'flameout': if (v === A && PART[d.part.id].engine.prop !== 'SOLID') ui.toast('Двигатель остановлен: нет топлива', '', 2000); break;
-    case 'chute': if (v === A) ui.toast(d.state === 'semi' ? 'Парашют раскрыт частично' : 'Парашют раскрыт полностью', '', 2000); break;
+    case 'chute': if (v === A) { ui.toast(d.state === 'semi' ? 'Парашют раскрыт частично' : 'Парашют раскрыт полностью', '', 2000); sndAt('chute', null, { vessel: v, full: d.state === 'full' }); } break;
+    case 'touch': if (v === A && performance.now() - (Game._touchT || 0) > 300) { Game._touchT = performance.now(); sndAt(d.water ? 'splash' : 'touch', null, { vessel: v, speed: d.speed }); } break;
     case 'chuteRip': if (v === A) ui.toast('Парашют оторвало: слишком высокая скорость', 'bad'); break;
     case 'landed': if (v === A && !v.prelaunch) ui.toast(`Посадка: ${v.body.name}`, 'good'); break;
   }
 };
 
-Game.launch = function (design) {
+// crew aboard these parts is lost (career) or sent home (sandbox)
+function loseCrew(parts) {
   const g = Game.g;
+  for (const p of parts) {
+    if (!p.crew || !p.crew.length) continue;
+    for (const id of p.crew) { const c = crewById(g, id); if (!c) continue; crewLost(g, id); ui.toast(isCareer(g) ? `Погиб${c.name.endsWith('а') ? 'ла' : ''}: ${esc(c.name)}` : `${esc(c.name)} спасён(а) — песочница`, isCareer(g) ? 'bad' : '', 4000); }
+    p.crew = [];
+  }
+}
+
+Game.launch = function (design, site, fromBuild) {
+  const g = Game.g;
+  if (g.race && !fromBuild && design && design.stack.length) { ui.buildDlg(design, site); return; }
   if (!design || !design.stack.length) { ui.toast('Ракета пуста', 'bad'); return; }
   if (!designHasCommand(design)) { ui.toast('Нужен командный модуль: капсула или зонд', 'bad'); return; }
   if (isCareer(g) && !designAllowed(g, design)) { ui.toast('В ракете есть неизученные детали', 'bad'); return; }
   const cost = designCost(design);
   const snapshot = JSON.stringify(gameToJSON(g));
-  if (isCareer(g) && g.funds < cost) { ui.modal('Не хватает средств', `Стоимость ракеты ${fmtMoney(cost)}, на счету ${fmtMoney(g.funds)}.`); return; }
+  if (!fromBuild && isCareer(g) && g.funds < cost) { ui.modal('Не хватает средств', `Стоимость ракеты ${fmtMoney(cost)}, на счету ${fmtMoney(g.funds)}.`); return; }
   // vessels left on the pad are recovered automatically
   const padLeft = g.vessels.filter(s => s.prelaunch);
   if (padLeft.length) {
     for (const s of padLeft) recoverVessel(g, deserializeVessel(s));
     g.vessels = g.vessels.filter(s => !s.prelaunch);
   }
-  spend(g, cost);
+  if (!fromBuild) spend(g, cost);
   g.lastCraft = JSON.parse(JSON.stringify(design));
   Game.leaveWorld();
   const W = Game.world = makeWorld();
   const v = buildVessel(design, design.name);
   v.craftName = design.name;
-  placeOnPad(v, g.ut);
+  assignCrew(g, v, design);
+  site = site || design.site || 'pad';
+  if (site === 'runway') placeOnRunway(v, g.ut); else placeOnPad(v, g.ut);
+  // landing gear starts extended, landing legs folded
+  if (v.parts.some(p => PART[p.id].gear && PART[p.id].gear.retract)) v.legs = true;
   v.loaded = true;
   W.vessels.push(v);
   W.active = v;
@@ -211,7 +262,10 @@ Game.launch = function (design) {
   W.cam.dist = Math.max(12, vesselBounds(v).size * 1.6 + 6);
   W.cam.pitch = 0.05;
   enterFlight();
-  ui.toast('На старте. ПРОБЕЛ — зажигание, Shift — тяга, T — SAS. F1 — управление.', '', 6000);
+  recStart(W, design.name);
+  ui.toast(site === 'runway' ? 'На полосе. ПРОБЕЛ — запуск двигателей, Shift — тяга, B — тормоз, A/D — руление, S — взять на себя. F1 — управление.' : 'На старте. ПРОБЕЛ — зажигание, Shift — тяга, T — SAS. F1 — управление.', '', 6000);
+  const pods = v.parts.filter(p => p.crew);
+  if (pods.length && !crewOf(v).length) ui.toast(hasControl(v) ? 'Капсула без экипажа: свободных космонавтов нет' : 'Капсула без экипажа и без зонда: кораблём нельзя управлять', 'bad', 6000);
 };
 
 function enterFlight() {
@@ -243,7 +297,7 @@ function updateLoaded(force) {
       v.loaded = false;
       const alt = V.len(v.r) - v.body.R;
       const inAtm = v.body.atm && alt < v.body.atm.top && !v.lock;
-      if (v.debris || inAtm) { const vw = W.views.get(v.id); if (vw) { RV.scene.remove(vw.group); W.views.delete(v.id); } continue; }
+      if (v.debris || inAtm) { const vw = W.views.get(v.id); if (vw) { RV.scene.remove(vw.group); W.views.delete(v.id); } loseCrew(v.parts); continue; }
       enterRails(v, t);
     }
     if (!v.loaded && !v.rails) enterRails(v, t);
@@ -313,12 +367,57 @@ function readControls(dt) {
     pitch: ax('KeyW', 'KeyS'), yaw: ax('KeyD', 'KeyA'), roll: ax('KeyE', 'KeyQ'),
     ty: ax('KeyH', 'KeyN'), tz: ax('KeyI', 'KeyK'), tx: ax('KeyL', 'KeyJ'),
     thr: (k.ShiftLeft || k.ShiftRight ? 1 : 0) - (k.ControlLeft || k.ControlRight ? 1 : 0),
+    brake: k.KeyB ? 1 : 0,
   };
+}
+
+// ---------------------------------------------------------------- alarms
+// earliest pending alarm: explicit ones, plus the active vessel's next manoeuvre while auto-stop is on
+function nextAlarm(W, t) {
+  const g = Game.g; let best = null;
+  for (const a of g.alarms || []) if (a.t > t && (!best || a.t < best.t)) best = a;
+  const A = W && W.active;
+  if (g.autoNodeAlarm !== false && A && !A.destroyed && A.nodes && A.nodes.length && Game.screen === 'flight') {
+    const info = nodeInfo(A), tn = A.nodes[0].t - (info && info.burn ? info.burn / 2 : 0) - 30;
+    if (tn > t + 1 && (!best || tn < best.t)) best = { t: tn, title: 'Манёвр', auto: true };
+  }
+  return best;
+}
+function fireAlarm(a, stopWarp) {
+  if (stopWarp) Game.stopWarp();
+  const vs = a.vid && Game.world && Game.world.vessels.find(v => v.id === a.vid);
+  ui.toast(`⏰ ${esc(a.title)}${vs ? ' · ' + esc(vs.name) : ''}`, 'acc', 5000);
+  if (!a.auto) removeAlarm(Game.g, a.id);
+}
+// warp step [t0, t1]: clamp to the next alarm and fire it
+function alarmClamp(W, t0, t1) {
+  const a = nextAlarm(W, t0);
+  if (a && a.t <= t1) { fireAlarm(a, true); return a.t; }
+  return t1;
+}
+function alarmsPassed(t0, t1) {
+  for (const a of (Game.g.alarms || []).slice()) if (a.t > t0 && a.t <= t1) fireAlarm(a, false);
+}
+
+// mapping satellites, every vessel that carries a scanner (on rails or loaded)
+function scanAll(vessels, t0, t1) {
+  const g = Game.g, cache = {};
+  for (const v of vessels) if (!v.destroyed && v.parts.some(p => !p.dead && PART[p.id].scanner)) { if (scanTick(g, v, t0, t1, cache) > 0) (g._scanDirty = g._scanDirty || {})[v.body.id] = true; }
+  const now = performance.now();
+  for (const id in cache) {
+    if (!(g._scanDirty || {})[id] || now - ((g._scanT = g._scanT || {})[id] || 0) < 1000) continue;
+    g._scanT[id] = now;
+    const cov = scanCoverage(cache[id]), x = mappingCredit(g, id, cov);
+    const pct = Math.floor(cov * 10) * 10, last = (g._scanPct = g._scanPct || {})[id];
+    if (last == null) g._scanPct[id] = pct;
+    else if (pct > last) { g._scanPct[id] = pct; ui.toast(`Картографирование: ${BODY[id].name} — ${pct}%${x > 0 ? ` · +${x.toFixed(1)} науки` : ''}`, 'good', 3500); }
+  }
 }
 
 function simulate(dt) {
   const W = Game.world, g = Game.g, A = W.active;
   const ctl = readControls(dt);
+  W.ctl = ctl;
   if (A && !A.destroyed) {
     if (ctl.thr) { A.throttle = clamp(A.throttle + ctl.thr * dt * 0.9, 0, 1); }
     if (W.warp > 0 && A.throttle > 0 && thrustWanted(A)) { Game.stopWarp(); ui.toast('Ускорение времени остановлено: тяга', '', 1500); }
@@ -338,6 +437,7 @@ function simulate(dt) {
     const t0 = g.ut;
     let t1 = t0 + dt * Game.warpLevels[W.warp];
     if (W.warpTo != null) t1 = Math.min(t1, W.warpTo);
+    t1 = alarmClamp(W, t0, t1);
     for (const v of W.vessels) if (!v.rails && !v.destroyed) enterRails(v, t0);
     if (A && !A.destroyed) {
       const res = railsAdvance(A, t0, t1);
@@ -351,11 +451,13 @@ function simulate(dt) {
       }
     }
     for (const v of W.vessels) if (v !== A && !v.destroyed) { const r = railsAdvance(v, t0, t1); if (r.event === 'impact' && !v.loaded) { v.destroyed = true; } }
+    scanAll(W.vessels, t0, t1);
     g.ut = t1;
     if (W.warp === 0) exitRailsLoaded();
     W.acc = 0;
     return;
   }
+  const tPhys0 = g.ut;
   // physics
   const k = Game.physLevels[W.physWarp];
   W.acc += dt * k;
@@ -370,16 +472,35 @@ function simulate(dt) {
       const alt = v.radarAlt != null ? v.radarAlt : V.len(v.r) - v.body.R;
       const near = !v.body.gas && alt < (v._bnd ? v._bnd.size : 40) + 80;
       const sub = near ? 4 : 1;
-      for (let i = 0; i < sub && !v.destroyed; i++) physicsStep(v, PHYS_DT / sub, g.ut + i * PHYS_DT / sub, v === A ? ctl : {}, vesselHooks(v));
+      const eva = isKerbalVessel(v);
+      if (eva && v === A) evaStep(v, evaInput(), PHYS_DT);
+      for (let i = 0; i < sub && !v.destroyed; i++) physicsStep(v, PHYS_DT / sub, g.ut + i * PHYS_DT / sub, v === A && !eva ? ctl : {}, vesselHooks(v));
       if (!v.destroyed && checkSOI(v, g.ut + PHYS_DT)) { if (v === A) { ui.toast(`Сфера влияния: ${v.body.name}`, 'acc'); W.trajT = -1; } }
       if (v === A && !v.destroyed) v.maxAlt = Math.max(v.maxAlt || 0, V.len(v.r) - v.body.R);
     }
+    for (const m of dockingStep(loaded, PHYS_DT, A)) Game.onDock(m);
     // vessels split off during this step join the simulation next step
     for (const v of W.vessels) if (v.loaded && !loaded.includes(v) && !v.destroyed) loaded.push(v);
     g.ut += PHYS_DT;
     if (++n > 60 * k) { W.acc = 0; break; }
   }
+  alarmsPassed(tPhys0, g.ut);
+  if (g.ut > tPhys0) scanAll(W.vessels, tPhys0, g.ut);
   for (const v of W.vessels) if (!v.loaded && !v.destroyed && v.rails) railsAdvance(v, t0, g.ut);
+}
+
+// camera-relative EVA input (WASD walk / fly, Shift-Ctrl up-down, Space jump, R jetpack)
+function evaInput() {
+  const W = Game.world, A = W.active, c = W.cam, k = Game.keys;
+  const up = V.norm(A.r);
+  let north = V.reject([0, 0, 1], up); if (V.len(north) < 1e-6) north = V.reject([1, 0, 0], up); north = V.norm(north);
+  const east = V.cross(north, up);
+  const hz = V.add(V.scale(north, -Math.cos(c.yaw)), V.scale(east, Math.sin(c.yaw)));
+  const fwd = V.neg(V.norm(V.add(V.scale(hz, Math.cos(c.pitch)), V.scale(up, Math.sin(c.pitch)))));
+  const right = V.norm(V.cross(fwd, up)), camUp = V.cross(right, fwd);
+  const ax = (a, b) => (k[a] ? 1 : 0) - (k[b] ? 1 : 0);
+  const jump = Game._evaJump; Game._evaJump = false;
+  return { fwd, right, up: camUp, mz: ax('KeyW', 'KeyS'), mx: ax('KeyD', 'KeyA'), my: (k.ShiftLeft || k.ShiftRight ? 1 : 0) - (k.ControlLeft || k.ControlRight ? 1 : 0), jump, jet: !!A.evaJet };
 }
 
 function flightFrame(dt) {
@@ -398,10 +519,24 @@ function flightFrame(dt) {
     W.progT = now;
     const ms = progressTick(g, A, g.ut);
     for (const m of ms) ui.toast(`Достижение: ${esc(m.title)} ${isCareer(g) ? `+${fmtMoney(m.funds)} +${m.sci} науки` : ''}`, 'acc', 5000);
+    Game.raceNews();
+    for (const r of siteCheck(g, A, g.ut)) ui.toast(r.what === 'found' ? `Найдено место посадки ${esc(r.s.name)} (${fmtDist(r.dist)})${isCareer(g) ? ` · +${r.sci.toFixed(0)} науки` : ''}` : `Осмотрено место посадки ${esc(r.s.name)}${isCareer(g) ? ` · +${r.sci.toFixed(0)} науки` : ''}`, 'acc', 5000);
   }
   // trajectory
   if (A && !A.destroyed && (now - W.trajT > (W.map ? 250 : 600) || W.trajT < 0)) { W.trajT = now; computeTraj(); }
+  // landing prediction while coming down (conic ends in the atmosphere / ground, or already flying low)
+  if (A && !A.destroyed && now - (W.impT || 0) > 1000) {
+    W.impT = now;
+    const p0 = W.traj && W.traj[0];
+    // ballistic only: not for winged craft, powered flight, or something already rolling on the ground
+    const winged = A.parts.some(p => !p.dead && PART[p.id].wing);
+    const down = !A.landed && !A.lock && !A.inContact && !A.body.gas && !winged && !(A.thrustNow > 0) &&
+      ((p0 && (p0.end === 'atmo' || p0.end === 'impact')) || (A.body.atm && V.len(A.r) - A.body.R < A.body.atm.top));
+    W.impact = down ? predictImpact(A, g.ut) : null;
+  }
   renderFlight(dt);
+  recFrame(W, g.ut);
+  sndFlight(W);
   ui.hud();
   if (W.map) ui.mnv(A, A && A.nodes && A.nodes[W.selNode], nodeInfo(A));
 }
@@ -446,7 +581,8 @@ function computeTraj() {
     }
   }
   // target closest approach
-  W.closest = W.target ? closestApproach(W.traj, W.target) : null;
+  const tv = targetVessel(W);
+  W.closest = tv ? closestApproachVessel(W.traj, tv, t) : W.target ? closestApproach(W.traj, W.target) : null;
 }
 
 function nodeInfo(A) {
@@ -601,12 +737,15 @@ function renderFlight(dt) {
     }
     if (W.warp === 0 && !W.map) spawnVesselFX(v, t, W.simDt, atm, air, hf);
   }
+  // historic landing sites near the camera
+  if (!W.map && A) updateSites(t, A.body);
+  else for (const m of (RV.siteMeshes || new Map()).values()) m.visible = false;
   if (W.warp > 0) FX.list.length = 0;
   let fxLight = [1, 1, 1];
   if (A && !W.map) { const l = lightAt(A.body, A.r, t); const k = 0.08 + 0.92 * l.sun * smooth(-0.1, 0.15, l.elev) + l.skyLight * 0.2; fxLight = [k, k * 0.97, k * 0.93]; }
   fxUpdate(W.warp > 0 ? 0 : W.simDt, fxLight);
   if (W.map) mapUpdate(t, A, W.traj, {
-    target: W.target, selNode: W.selNode, closest: W.closest,
+    target: W.target, selNode: W.selNode, closest: W.closest, vessels: W.vessels, setTarget: (id) => Game.setTarget(id), impact: W.impact,
     focusBody: (id) => { MAP.focus = { kind: 'body', id }; MAP.dist = Math.max(BODY[id].R * 4, Math.min(MAP.dist, BODY[id].soi * 2 || 1e12)); ui.toast(`Фокус: ${BODY[id].name}. <a style="color:#9cf;cursor:pointer" onclick="Game.setTarget('${id}')">Сделать целью</a>`, '', 3500); },
     focusVessel: () => { MAP.focus = { kind: 'vessel' }; },
     selectNode: (i) => { W.selNode = i; },
@@ -615,17 +754,37 @@ function renderFlight(dt) {
   if (A && !A.destroyed) {
     const up = V.norm(A.r);
     let north = V.reject([0, 0, 1], up); if (V.len(north) < 1e-6) north = [1, 0, 0]; north = V.norm(north);
-    const mode = navSpeedMode(A);
-    const sv = mode === 'surface' ? V.sub(A.v, V.cross(bodyOmega(A.body), A.r)) : A.v;
+    const ts = targetState(W, t);
+    A.tgtRel = ts ? V.sub(V.add(bodyAbsState(A.body, t).v, A.v), ts.v) : null;
+    if (!ts && A.speedMode === 'target') A.speedMode = 'auto';
+    const sv = navVelocity(A);
     const dirs = {};
     if (V.len(sv) > 0.1) {
       const pro = V.norm(sv), nrm = V.norm(V.cross(A.r, sv)), rad = V.cross(pro, nrm);
       Object.assign(dirs, { pro, retro: V.neg(pro), normal: nrm, anti: V.neg(nrm), radout: rad, radin: V.neg(rad) });
     }
     if (A.nodeBurn && V.len(A.nodeBurn) > 0.01) dirs.node = V.norm(A.nodeBurn);
-    if (W.target) { const ta = bodyAbsPos(BODY[W.target], t); dirs.target = V.norm(V.sub(ta, V.add(bodyAbsPos(A.body, t), A.r))); A.targetDir = dirs.target; }
-    updateNavball(A, up, north, dirs);
+    if (ts) { dirs.target = V.norm(V.sub(ts.r, V.add(bodyAbsPos(A.body, t), A.r))); dirs.antitarget = V.neg(dirs.target); A.targetDir = dirs.target; }
+    else A.targetDir = null;
+    updateNavball({ q: ctrlQ(A) }, up, north, dirs);
     drawNavball(Math.round(RV.w / 2 - 210 + 115), RV.h - 196, 190);
+  }
+}
+
+function updateSites(t, b) {
+  RV.siteMeshes = RV.siteMeshes || new Map();
+  const g = Game.g, bAbs = bodyAbsPos(b, t);
+  for (const s of SITES) {
+    let m = RV.siteMeshes.get(s.id);
+    const here = s.body === b.id && siteExists(g, s);
+    if (!here) { if (m) m.visible = false; continue; }
+    const d = siteDir(s), pF = V.scale(d, b.R + siteGround(s));
+    const abs = V.add(bAbs, bodyFixedToInertial(b, t, pF));
+    if (V.dist(abs, RV.camAbs) > 40000) { if (m) m.visible = false; continue; }
+    if (!m) { m = buildSiteMesh(s); RV.scene.add(m); RV.siteMeshes.set(s.id, m); }
+    m.visible = true;
+    relT(abs, m.position);
+    quatT(Q.mul(bodyRotQuat(b, t), Q.fromTo([0, 1, 0], d)), m.quaternion);
   }
 }
 
@@ -644,11 +803,11 @@ function spawnVesselFX(v, t, dt, atm, air, hf) {
   for (const p of v.parts) {
     if (p.dead || !p.st.eng || !p.st.eng.on || p.st.eng.out || !(p.st.eng.thr > 0.02)) continue;
     const d = PART[p.id];
-    const ex = V.add(hull, Q.rot(v.q, V.sub([p.pos[0], p.pos[1] - d.h / 2 - 0.4, p.pos[2]], mp.com)));
-    const back = Q.rot(v.q, [0, -1, 0]);
+    const ex = V.add(hull, Q.rot(v.q, V.sub(partPt(p, [0, -d.h / 2 - 0.4, 0]), mp.com)));
+    const back = Q.rot(v.q, V.neg(partAxis(p)));
     const thr = p.st.eng.thr;
     const solid = d.engine.prop === 'SOLID';
-    if (atm.p > 0.015 && d.engine.prop !== 'XENON') {
+    if (atm.p > 0.015 && d.engine.prop !== 'XENON' && !d.engine.air) {   // turbines leave no smoke trail
       const rate = (solid ? 5 : 2.5) * thr * Math.min(1, atm.p * 3) * dt * 60;
       for (let i = 0; i < rate; i++) {
         if (Math.random() > 0.75) continue;
@@ -673,6 +832,15 @@ function spawnVesselFX(v, t, dt, atm, air, hf) {
         const pv = V.add(V.add(windV, V.scale(hd, sp)), V.scale(up, 2 + Math.random() * 6));
         fxSpawn(V.add(ground, V.scale(hd, 2 + Math.random() * 4)), pv, kind, 2.4 + Math.random() * 2.5, 3 + Math.random() * 5, windV);
       }
+    }
+  }
+  // EVA jetpack: small cold-gas puffs from the backpack
+  const kp = v.parts.length === 1 && PART[v.parts[0].id].kerbal ? v.parts[0] : null;
+  if (kp && kp.st.jet > 0.05) {
+    for (let n = 40 * dt; n > 0; n--) {
+      if (n < 1 && Math.random() > n) break;
+      const pos = V.add(hull, Q.rot(v.q, V.sub(partPt(kp, [R(0, 0.2), -0.12, -0.26]), mp.com)));
+      fxSpawn(pos, V.add(V.add(bs.v, v.v), Q.rot(v.q, [R(0, 1.5), R(0, 1.5), -2 - Math.random() * 2])), 'steam', 0.12 + Math.random() * 0.1, 0.5 + Math.random() * 0.4, V.add(bs.v, v.v));
     }
   }
   if (hf > 1.2e6) {
@@ -700,7 +868,10 @@ Game.stage = function () {
   if (!hasControl(A)) { ui.toast('Нет управления (нет электричества?)', 'bad'); return; }
   if (A.stageIdx >= A.stages.length) { ui.toast('Ступеней больше нет', '', 1500); return; }
   if (W.warp > 0) Game.stopWarp();
+  const fired = A.stages[A.stageIdx] || [];
   const out = activateStage(A, Game.g.ut, vesselHooks(A));
+  if (fired.some(r => PART[A.parts[r].id].decoupler)) sndAt('decouple', null, { vessel: A });
+  if (fired.some(r => PART[A.parts[r].id].engine)) sndAt('ignite', null, { vessel: A, level: 0.8 });
   for (const c of out) if (!W.vessels.includes(c)) { c.loaded = true; W.vessels.push(c); }
   updateLoaded();
   W.trajT = -1; W.dvT = -1;
@@ -717,25 +888,28 @@ Game.moveStage = function (uid, from, to, newStage) {
   W.dvT = -1;
   const el = document.getElementById('h-stages'); if (el) el._sig = null;
 };
-Game.toggleSAS = function () { const A = Game.world && Game.world.active; if (!A) return; A.sas = !A.sas; A.sasHold = null; if (!A.sasMode) A.sasMode = 'stab'; };
+Game.toggleSAS = function () { const A = Game.world && Game.world.active; if (!A) return; A.sas = !A.sas; A.sasHold = null; if (!A.sasMode) A.sasMode = 'stab'; sndUi('beep'); };
 Game.setSASMode = function (m) {
   const A = Game.world && Game.world.active; if (!A) return;
+  if (!sasAllowed(Game.g, A, m)) { const need = SAS_LEVEL[m]; ui.toast(need ? `Нужен пилот ${need}-го уровня или зонд` : 'Нужен пилот или зонд', 'bad', 2500); return; }
   if (m === 'node' && !A.nodeBurn) { ui.toast('Нет манёвра', '', 1500); return; }
-  if (m === 'target' && !Game.world.target) { ui.toast('Цель не выбрана: на карте щёлкните по телу', '', 2500); return; }
+  if ((m === 'target' || m === 'antitarget') && !Game.world.target) { ui.toast('Цель не выбрана: на карте щёлкните по телу или аппарату', '', 2500); return; }
   A.sas = true; A.sasMode = m; A.sasHold = null;
 };
 Game.toggleRCS = function () { const A = Game.world && Game.world.active; if (A) A.rcs = !A.rcs; };
 Game.toggleLegs = function () {
   const A = Game.world && Game.world.active; if (!A) return;
   A.legs = !A.legs;
+  sndAt('legs', null, { vessel: A });
   for (const p of A.parts) if (!p.dead && PART[p.id].legs) p.st.legs = A.legs;
+  for (const p of A.parts) if (!p.dead && PART[p.id].gear && PART[p.id].gear.retract) p.st.gear = A.legs;
   if (A.lock && !A.legs) { /* stays locked */ }
   A._bnd = null;
 };
 Game.toggleSpeedMode = function () {
-  const A = Game.world && Game.world.active; if (!A) return;
+  const W = Game.world, A = W && W.active; if (!A) return;
   const cur = navSpeedMode(A);
-  A.speedMode = cur === 'surface' ? 'orbit' : 'surface';
+  A.speedMode = cur === 'surface' ? 'orbit' : cur === 'orbit' && W.target ? 'target' : 'surface';
 };
 Game.toggleMap = function () {
   const W = Game.world; if (!W) return;
@@ -750,9 +924,52 @@ Game.toggleMap = function () {
 };
 Game.setTarget = function (id) {
   const W = Game.world; if (!W) return;
+  if (W.active && id === 'v:' + W.active.id) return;
   W.target = W.target === id ? null : id;
-  ui.toast(W.target ? 'Цель: ' + BODY[id].name : 'Цель снята', '', 2000);
+  ui.toast(W.target ? 'Цель: ' + esc(targetName(W)) : 'Цель снята', '', 2000);
   W.trajT = -1;
+};
+// target is a body id or 'v:<vessel id>'
+function targetVessel(W) {
+  if (!W || !W.target || !W.target.startsWith('v:')) return null;
+  const v = W.vessels.find(x => x.id === W.target.slice(2));
+  return v && !v.destroyed ? v : null;
+}
+function targetName(W) { const tv = targetVessel(W); return tv ? tv.name : W.target && BODY[W.target] ? BODY[W.target].name : ''; }
+// heliocentric position / velocity of the current target
+function targetState(W, t) {
+  if (!W.target) return null;
+  if (W.target.startsWith('v:')) {
+    const tv = targetVessel(W);
+    if (!tv) { W.target = null; return null; }
+    const bs = bodyAbsState(tv.body, t);
+    return { r: V.add(bs.r, tv.r), v: V.add(bs.v, tv.v), vessel: tv };
+  }
+  return BODY[W.target] ? bodyAbsState(BODY[W.target], t) : null;
+}
+Game.onDock = function (m) {
+  const W = Game.world, g = Game.g;
+  for (const v of [m.keep, m.gone]) { const vw = W.views.get(v.id); if (vw) { RV.scene.remove(vw.group); vw.dispose(); W.views.delete(v.id); } }
+  W.vessels = W.vessels.filter(v => v !== m.gone);
+  if (W.active === m.gone) W.active = m.keep;
+  for (const id of crewOf(m.keep)) { const c = crewById(g, id); if (c) c.vessel = m.keep.id; }
+  if (W.target === 'v:' + m.gone.id || W.target === 'v:' + m.keep.id) W.target = null;
+  updateLoaded();
+  W.trajT = -1; W.dvT = -1;
+  sndAt('dock', null, { vessel: m.keep });
+  ui.toast(`Стыковка: ${esc(m.keep.name)} + ${esc(m.gone.name)}`, 'good', 3000);
+  const ms = milestone(g, 'dock'); if (ms) ui.toast(`Достижение: ${esc(ms.title)}`, 'acc');
+  contractEvent(g, 'docked', { a: m.keep, b: m.gone });
+};
+Game.undock = function (rid) {
+  const W = Game.world, A = W && W.active; if (!A) return;
+  const out = undock(A, +rid, vesselHooks(A));
+  for (const c of out) { if (!W.vessels.includes(c)) { c.loaded = true; W.vessels.push(c); } for (const id of crewOf(c)) { const k = crewById(Game.g, id); if (k) k.vessel = c.id; } }
+  if (A.ctrlPort != null && A.parts[A.ctrlPort] && A.parts[A.ctrlPort].dead) A.ctrlPort = null;
+  updateLoaded();
+  W.trajT = -1; W.dvT = -1;
+  sndAt('decouple', null, { vessel: A, level: 0.6 });
+  if (out.length) ui.toast('Расстыковка: ' + esc(out[0].name), '', 2500);
 };
 Game.switchVessel = function (dir) {
   const W = Game.world; if (!W || !W.active) return;
@@ -765,12 +982,118 @@ Game.switchVessel = function (dir) {
   ui.toast('Управление: ' + esc(W.active.name), '', 2000);
 };
 
+// ---------------------------------------------------------------- EVA
+Game.eva = function (rid, kid) {
+  const W = Game.world, A = W && W.active, g = Game.g; if (!A) return;
+  const p = A.parts[+rid], c = crewById(g, kid);
+  if (!p || p.dead || !p.crew || !p.crew.includes(kid) || !c) return;
+  if (W.warp > 0) Game.stopWarp();
+  const air = V.sub(A.v, V.cross(bodyOmega(A.body), A.r));
+  if (A.body.atm && V.len(A.r) - A.body.R < A.body.atm.top && V.len(air) > 40) { ui.toast('Слишком быстро для выхода в атмосфере', 'bad'); return; }
+  const k = buildVessel(makeDesign(c.name, ['kerbal']), c.name);
+  k.parts[0].crew = [kid];
+  p.crew = p.crew.filter(x => x !== kid);
+  const mp = massProps(A), hl = hatchLocal(p);
+  const arm = Q.rot(A.q, V.sub(hl, mp.com));
+  const out = Q.rot(A.q, Q.rot(partQ(p), [1, 0, 0]));
+  const upL = V.norm(A.r);
+  k.body = A.body;
+  k.r = V.addS(V.add(A.r, arm), out, 0.25);
+  k.v = V.add(V.add(A.v, V.cross(Q.rot(A.q, A.w), arm)), A.lock ? [0, 0, 0] : V.scale(out, 0.3));
+  if (A.lock) k.v = V.cross(bodyOmega(A.body), k.r);
+  const up = A.lock || A.landed ? upL : Q.rot(A.q, [0, 1, 0]);
+  k.q = Q.fromBasis(V.norm(V.cross(up, V.reject(out, up))), up, V.norm(V.reject(out, up)));
+  k.w = [0, 0, 0];
+  k.launchUT = A.launchUT; k.loaded = true; k.isEva = true;
+  k.parts[0].st.evaFuel = EVA.fuel;
+  c.vessel = k.id;
+  W.vessels.push(k); W.active = k;
+  updateLoaded();
+  W.cam.dist = 5; W.cam.pitch = 0.2; W.trajT = -1; W.dvT = -1;
+  sndAt('decouple', null, { vessel: k, level: 0.25 });
+  ui.toast(`${esc(c.name)} в открытом космосе. WASD — движение, Shift/Ctrl — вверх/вниз, R — ранец, Пробел — прыжок, B — в люк, F — флаг`, '', 7000);
+};
+Game.board = function () {
+  const W = Game.world, k = W && W.active, g = Game.g; if (!k || !isKerbalVessel(k)) return;
+  const h = nearestHatch(W.vessels, k);
+  if (!h) { ui.toast('Рядом нет люка со свободным местом (подойдите ближе 2.5 м)', 'bad', 2500); return; }
+  const kp = kerbalPart(k), kid = kp.crew[0];
+  h.part.crew = (h.part.crew || []).concat([kid]);
+  h.part.data.push(...kp.data);
+  const c = crewById(g, kid); if (c) c.vessel = h.vessel.id;
+  kp.crew = []; k.destroyed = true;
+  const vw = W.views.get(k.id); if (vw) { RV.scene.remove(vw.group); vw.dispose(); W.views.delete(k.id); }
+  W.vessels = W.vessels.filter(x => x !== k);
+  if (W.target === 'v:' + h.vessel.id) W.target = null;
+  W.active = h.vessel;
+  W.cam.dist = Math.max(10, vesselBounds(h.vessel).size * 1.6 + 6);
+  updateLoaded(); W.trajT = -1; W.dvT = -1;
+  sndAt('dock', null, { vessel: h.vessel, level: 0.4 });
+  ui.toast(`${esc(c ? c.name : '')} на борту «${esc(h.vessel.name)}»`, 'good', 2500);
+};
+Game.plantFlag = function () {
+  const W = Game.world, k = W && W.active, g = Game.g; if (!k || !isKerbalVessel(k)) return;
+  const b = k.body, t = g.ut;
+  if (!(k.inContact || k.lock) || b.gas || !b.terrain) { ui.toast('Флаг ставится только стоя на поверхности', 'bad', 2000); return; }
+  const kid = kerbalPart(k).crew[0], c = crewById(g, kid);
+  const face = Q.rot(k.q, [0, 0, 1]);
+  const pos = V.addS(k.r, V.norm(V.reject(face, V.norm(k.r))), 1.2);
+  const f = buildVessel(makeDesign('Флаг', ['flag']), `Флаг · ${b.name}`);
+  f.body = b;
+  const dF = V.norm(inertialToBodyFixed(b, t, pos)), h = PART.flag.h;
+  const gh = groundHeight(b, dF, 2);
+  const upF = dF, eastF = V.norm(V.cross([0, 0, 1], upF)), southF = V.neg(V.cross(upF, eastF));
+  f.lock = { pf: V.scale(dF, b.R + gh + h / 2 + 0.01), qf: Q.mul(Q.fromBasis(eastF, upF, southF), Q.axisAngle([0, 1, 0], Math.random() * TAU)) };
+  f.landed = true; f.w = [0, 0, 0]; f._comPrev = massProps(f).com.slice();
+  applyLock(f, t);
+  f.loaded = true; f.flagBy = c ? c.name : ''; f.flagUT = t;
+  W.vessels.push(f); updateLoaded();
+  g.stats.flags = (g.stats.flags || 0) + 1;
+  crewLog(g, kid, b.id, 'flag');
+  const ms = milestone(g, 'flag_' + b.id); if (ms) ui.toast(`Достижение: ${esc(ms.title)}`, 'acc');
+  contractEvent(g, 'flag', { body: b.id });
+  sndAt('touch', null, { vessel: k, speed: 2 });
+  ui.toast(`Флаг установлен: ${esc(b.name)}`, 'good', 2500);
+};
+// parts on nearby vessels the astronaut can reach (3 m)
+function evaReach(W, k) {
+  const out = [];
+  for (const v of W.vessels) {
+    if (v === k || v.destroyed || v.body !== k.body || V.dist(v.r, k.r) > 60) continue;
+    const mp = massProps(v);
+    for (const p of v.parts) if (!p.dead && V.dist(V.add(v.r, Q.rot(v.q, V.sub(p.pos, mp.com))), k.r) < 3 + colRadius(PART[p.id])) out.push({ v, p });
+  }
+  return out;
+}
+Game.evaWork = function (what) {
+  const W = Game.world, k = W && W.active, g = Game.g; if (!k || !isKerbalVessel(k)) return;
+  const c = crewById(g, kerbalPart(k).crew[0]);
+  let n = 0;
+  for (const { v, p } of evaReach(W, k)) {
+    const d = PART[p.id];
+    if (what === 'repack' && d.chute && p.st.chute !== 'stowed' && p.st.chute !== 'armed') { p.st.chute = 'stowed'; p.st.chuteT = 0; n++; if (v.stageIdx >= v.stages.length || !v.stages.slice(v.stageIdx).some(s => s.includes(p.rid))) v.stages.push([p.rid]); }
+    if (what === 'reset' && d.sci && EXPERIMENTS[d.sci].single && p.st.used && !p.data.length) { p.st.used = false; n++; }
+  }
+  if (what === 'repack') ui.toast(n ? `${esc(c.name)}: перепаковано парашютов — ${n}` : 'Рядом нет использованных парашютов', n ? 'good' : '', 2200);
+  if (what === 'reset') ui.toast(n ? `${esc(c.name)}: эксперименты готовы к повтору — ${n}` : 'Рядом нет использованных экспериментов без данных', n ? 'good' : '', 2200);
+};
+
 Game.scienceList = function (v) {
   const g = Game.g, out = [];
   const antenna = v.parts.some(p => !p.dead && PART[p.id].antenna);
   for (const p of v.parts) {
     if (p.dead) continue;
     const d = PART[p.id];
+    if (d.kerbal) {
+      for (const exp of ['eva', 'sample']) {
+        const e = EXPERIMENTS[exp], a = expAvailable(exp, v);
+        const have = p.data.filter(x => x.exp === exp).length;
+        if (exp === 'sample' && a.ok && (v.body.gas || !v.body.terrain)) continue;
+        out.push({ name: e.name, status: (a.ok ? `здесь: ≈${dataValue(g, { exp, body: v.body.id, sit: a.sit }, false).toFixed(1)} науки` : a.why) + (have ? ` · с собой ${have}` : ''),
+          buttons: [{ a: 'run', r: p.rid, x: exp, label: exp === 'sample' ? 'Взять образец' : 'Доклад', dis: !a.ok }] });
+      }
+      continue;
+    }
     if (d.command && d.command.crew > 0 && !out.some(x => x.crew)) {
       const a = expAvailable('crew', v);
       const pod = p;
@@ -827,10 +1150,74 @@ Game.action = function (a, r, x) {
     case 'chutes': for (const q of A.parts) if (!q.dead && q.st.chute === 'stowed') q.st.chute = 'armed'; ui.toast('Парашюты взведены: раскроются при безопасной скорости', '', 2500); break;
     case 'legs': Game.toggleLegs(); break;
     case 'solar': for (const q of A.parts) if (!q.dead && PART[q.id].solar) q.st.solar = !q.st.solar; break;
+    case 'undock': Game.undock(r); break;
+    case 'eva': Game.eva(r, x); return;
+    case 'jet': A.evaJet = !A.evaJet; break;
+    case 'board': Game.board(); return;
+    case 'flag': Game.plantFlag(); break;
+    case 'repack': case 'reset': Game.evaWork(a); break;
+    case 'scan': for (const q of A.parts) if (!q.dead && PART[q.id].scanner) q.st.scan = q.st.scan === false; break;
+    case 'atlas': ui.atlas(A.body.id); return;
+    case 'xfer': Game.autoTransfer(); break;
+    case 'refine': Game.refineTransfer(); break;
+    case 'match': Game.matchVelocity(); break;
+    case 'ctrl': A.ctrlPort = A.ctrlPort === +r ? null : +r; A.sasHold = null; ui.toast(A.ctrlPort != null ? 'Управление от стыковочного узла' : 'Управление от корабля', '', 1800); break;
     case 'ksc': Game.leaveFlight(); break;
   }
   if (ui.root.querySelector('#h-act')) ui.root.querySelector('#h-act')._h = null;
   ui.hud(true);
+};
+
+// ---------------------------------------------------------------- automatic transfers
+// periapsis to aim for at a body: above the atmosphere, or a low orbit
+function aimPe(b) { return b.atm ? b.atm.top + 15000 : Math.max(10000, b.R * 0.05); }
+Game.autoTransfer = function () {
+  const W = Game.world, A = W && W.active, g = Game.g, t = g.ut; if (!A || A.landed || A.prelaunch) return;
+  const tv = targetVessel(W), tb = !tv && W.target ? BODY[W.target] : null;
+  const el = elFromState(A.r, A.v, A.body.mu, t);
+  if (el.e >= 1) { ui.toast('Сначала выйдите на замкнутую орбиту', 'bad'); return; }
+  const done = (nd, tgt, want, what) => {
+    if (!nd) { ui.toast('Не удалось построить перелёт', 'bad'); return; }
+    A.nodes = [{ t: nd.t, dv: nd.dv.slice() }];
+    W.selNode = A.nodes.length - 1; computeTraj();
+    ui.toast(`${what}: уточняю…`, '', 2500);
+    refineNode(A, tgt, want, Game.g.ut, (best) => {
+      computeTraj();
+      const msg = tgt.vessel ? `сближение ${fmtDist(best.d)}` : best.enc ? `встреча, перицентр ${fmtDist(best.pe)}` : `промах ${fmtDist(best.d)}`;
+      ui.toast(`${what}: ${msg}. Δv ${V.len(A.nodes[A.nodes.length - 1].dv).toFixed(0)} м/с`, best.enc || tgt.vessel ? 'good' : 'bad', 5000);
+    });
+  };
+  if (tv) {
+    if (tv.body !== A.body) { ui.toast('Цель в другой сфере влияния', 'bad'); return; }
+    done(hohmannNode(A, { vessel: tv }, t), { vessel: tv }, 0, 'Перелёт к ' + tv.name);
+  } else if (tb && tb.parent === A.body) {
+    done(hohmannNode(A, { body: tb }, t), { body: tb }, aimPe(tb), 'Перелёт к ' + tb.name);
+  } else if (tb && A.body.parent && tb.parent === A.body.parent) {
+    ui.toast('Ищу лучшее окно перелёта…', '', 2500);
+    porkchop(A.body, tb, t + 3600, { nx: 70, ny: 45 }, (G) => {
+      if (!G.best) { ui.toast('Окно не найдено', 'bad'); return; }
+      const tr = transferAt(G, G.best.td, G.best.tof);
+      done(ejectionNode(A, tr.vinf, G.best.td, Game.g.ut), { body: tb }, aimPe(tb), `Окно через ${fmtDur(G.best.td - Game.g.ut, true)} → ${tb.name}`);
+    });
+  } else ui.toast('Автоперелёт: цель должна вращаться вокруг того же тела, что и вы, или вокруг его родителя', 'bad', 4000);
+};
+Game.refineTransfer = function () {
+  const W = Game.world, A = W && W.active; if (!A || !A.nodes || !A.nodes.length) { ui.toast('Нет манёвра', 'bad'); return; }
+  const tv = targetVessel(W), tb = !tv && W.target ? BODY[W.target] : null;
+  if (!tv && !tb) { ui.toast('Выберите цель', 'bad'); return; }
+  ui.toast('Уточняю манёвр…', '', 2000);
+  refineNode(A, tv ? { vessel: tv } : { body: tb }, tb ? aimPe(tb) : 0, Game.g.ut, (best) => {
+    computeTraj();
+    ui.toast(tv ? `Сближение ${fmtDist(best.d)}` : best.enc ? `Встреча, перицентр ${fmtDist(best.pe)}` : `Промах ${fmtDist(best.d)}`, best.enc || tv ? 'good' : 'bad', 4000);
+  });
+};
+Game.matchVelocity = function () {
+  const W = Game.world, A = W && W.active, tv = targetVessel(W); if (!A || !tv) return;
+  const nd = matchVelocityNode(A, tv, Game.g.ut);
+  if (!nd) { ui.toast('Нет точки сближения впереди', 'bad'); return; }
+  A.nodes = A.nodes || []; A.nodes.push({ t: nd.t, dv: nd.dv }); A.nodes.sort((a, b) => a.t - b.t);
+  W.selNode = A.nodes.findIndex(x => x.t === nd.t); computeTraj();
+  ui.toast(`Уравнять скорость: ${V.len(nd.dv).toFixed(1)} м/с через ${fmtDur(nd.t - Game.g.ut, true)}`, 'good', 3500);
 };
 
 // ---------------------------------------------------------------- maneuver nodes
@@ -889,7 +1276,7 @@ function persistWorld() {
   for (const v of W.vessels) {
     if (v.destroyed || v.debris) continue;
     if (v.prelaunch) { recoverVessel(g, v); continue; }
-    if (!vesselStable(v, t)) continue;
+    if (!vesselStable(v, t)) { loseCrew(v.parts); continue; }
     keep.push(serializeVessel(v));
   }
   g.vessels = keep;
@@ -926,7 +1313,8 @@ function showRecovery(r, name) {
     ${isCareer(g) ? `<p>Возмещение: <b class="accent">${fmtMoney(r.funds)}</b> (${Math.round(r.factor * 100)}% стоимости)</p>` : ''}
     <p>Наука: <b style="color:#7fd0ff">+${r.sci.toFixed(1)}</b></p>
     ${r.items.map(([n, x]) => `<div class="dim">${esc(n)} — ${x.toFixed(1)}</div>`).join('')}
-    ${r.milestones.map(m => `<div class="accent">Достижение: ${esc(m.title)}</div>`).join('')}`);
+    ${r.milestones.map(m => `<div class="accent">Достижение: ${esc(m.title)}</div>`).join('')}
+    ${(r.crew || []).map(([n, x]) => `<div>${esc(n)}: опыт +${x.gain.toFixed(1)}${x.up ? ' <span class="accent">— новый уровень!</span>' : ''}</div>`).join('')}`);
 }
 Game.revert = function (kind) {
   const W = Game.world; if (!W || !W.launch) return;
@@ -952,8 +1340,12 @@ Game.openTracking = function () {
 function trackFrame(dt) {
   const W = Game.world, g = Game.g; if (!W) return;
   if (W.warp > 0) {
-    const t0 = g.ut, t1 = t0 + dt * Game.warpLevels[W.warp];
+    const t0 = g.ut;
+    let t1 = t0 + dt * Game.warpLevels[W.warp];
+    if (W.warpTo != null) { t1 = Math.min(t1, W.warpTo); if (t1 >= W.warpTo) { W.warp = 0; W.warpTo = null; } }
+    t1 = alarmClamp(W, t0, t1);
     for (const v of W.vessels) if (!v.destroyed) { if (!v.rails) enterRails(v, t0); const r = railsAdvance(v, t0, t1); if (r.event === 'impact') v.destroyed = true; }
+    scanAll(W.vessels, t0, t1);
     g.ut = t1;
   }
   const now = performance.now();
@@ -969,7 +1361,7 @@ function trackFrame(dt) {
     focusVessel: () => { MAP.focus = { kind: 'vessel' }; }, selectNode: () => {},
   });
   drawFrame();
-  if (now - (W.listT || 0) > 600) { W.listT = now; ui.trackList(); const wr = $('#t-wr'); if (wr) wr.textContent = '×' + Game.warpRate().toLocaleString('ru-RU') + ' · ' + fmtDate(g.ut); }
+  if (now - (W.listT || 0) > 600) { W.listT = now; ui.trackList(); Game.raceNews(); const wr = $('#t-wr'); if (wr) wr.textContent = '×' + Game.warpRate().toLocaleString('ru-RU') + ' · ' + fmtDate(g.ut); }
 }
 Game.trackSelect = function (id) {
   const W = Game.world; W.trackSel = id;
@@ -986,6 +1378,7 @@ Game.flyVessel = function (id) {
   W.cam.dist = Math.max(10, vesselBounds(v).size * 1.6 + 6);
   if (v.rails) { v.rails = null; if (v.lock) applyLock(v, Game.g.ut); }
   enterFlight();
+  recStart(W, v.name);
 };
 Game.recoverTracked = function (id) {
   const W = Game.world, v = W.vessels.find(x => x.id === id);
@@ -998,6 +1391,7 @@ Game.recoverTracked = function (id) {
 };
 Game.terminate = function (id) {
   const W = Game.world;
+  const tv = W.vessels.find(x => x.id === id); if (tv) loseCrew(tv.parts);
   W.vessels = W.vessels.filter(x => x.id !== id);
   W.trackSel = null;
   persistWorld(); Game.autosave(); ui.trackList();
@@ -1023,6 +1417,7 @@ Game.loadSlot = function (slot) {
 };
 Game.applyLoaded = function (g) {
   Game.leaveWorld();
+  initCrew(g); g.builds = g.builds || [];      // saves (or imported files) from before the corps / build queue
   Game.g = g;
   g._notify = (m) => ui.toast(m, 'acc', 5000);
   if (g.activeVesselId && g.vessels.some(s => s.id === g.activeVesselId)) {
@@ -1071,6 +1466,11 @@ function setupInput(canvas) {
     if (Game.screen === 'flight') flightKey(e);
     else if (Game.screen === 'track') { if (e.code === 'Period') Game.warpUp(); if (e.code === 'Comma') Game.warpDown(); if (e.code === 'Slash') Game.stopWarp(); if (e.code === 'Escape') Game.toKSC(); }
     else if (Game.screen === 'vab') vabKey(e);
+    else if (Game.screen === 'replay') {
+      if (e.code === 'Escape') { if (RPL.recorder) { Game.stopVideo(); ui.replayHud(null, null, true); } else Game.closeReplay(); }
+      if (e.code === 'Space') RPL.playing = !RPL.playing;
+      if (e.code === 'ArrowRight' || e.code === 'ArrowLeft') { const D = REC.data; RPL.t = clamp(RPL.t + (e.code === 'ArrowRight' ? 10 : -10) * Math.max(1, RPL.speed), D.frames[0].t, D.frames[D.frames.length - 1].t); }
+    }
     else if (Game.screen === 'ksc' || Game.screen === 'rnd' || Game.screen === 'mc') { if (e.code === 'Escape' && Game.screen !== 'ksc') Game.toKSC(); }
   });
   window.addEventListener('keyup', (e) => { Game.keys[e.code] = false; });
@@ -1094,6 +1494,9 @@ function setupInput(canvas) {
     if (Game.screen === 'vab') {
       if (M.btn === 2) VAB.camY = clamp(VAB.camY - dy * VAB.dist * 0.002, 0.5, Math.max(4, VAB.height + 4));
       else { VAB.yaw += dx * 0.006; VAB.pitch = clamp(VAB.pitch + dy * 0.004, -0.4, 1.3); }
+    } else if (Game.screen === 'replay') {
+      RPL.orbit.yaw -= dx * 0.005; RPL.orbit.pitch = clamp(RPL.orbit.pitch + dy * 0.004, -1.45, 1.45);
+      if (RPL.cam === 'auto') { RPL.cam = 'chase'; ui.replayHud(null, null, true); }
     } else if (Game.world && (Game.world.map || Game.screen === 'track')) {
       MAP.yaw -= dx * 0.005; MAP.pitch = clamp(MAP.pitch + dy * 0.005, -1.5, 1.5);
     } else if (Game.world) {
@@ -1118,6 +1521,7 @@ function setupInput(canvas) {
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
     const f = Math.pow(1.0015, e.deltaY);
+    if (Game.screen === 'replay') { RPL.orbit.dist = clamp(RPL.orbit.dist * f, 3, 30000); return; }
     if (Game.screen === 'vab') {
       if (e.shiftKey) VAB.camY = clamp(VAB.camY - e.deltaY * 0.01, 0.5, Math.max(4, VAB.height + 4));
       else VAB.dist = clamp(VAB.dist * f, 3, 200);
@@ -1134,9 +1538,11 @@ function flightKey(e) {
   const W = Game.world; if (!W) return;
   const A = W.active;
   switch (e.code) {
-    case 'Space': Game.stage(); break;
+    case 'Space': if (A && isKerbalVessel(A)) Game._evaJump = true; else Game.stage(); break;
     case 'KeyT': Game.toggleSAS(); break;
-    case 'KeyR': Game.toggleRCS(); break;
+    case 'KeyR': if (A && isKerbalVessel(A)) { A.evaJet = !A.evaJet; ui.toast(A.evaJet ? 'Ранец включён' : 'Ранец выключен', '', 1200); } else Game.toggleRCS(); break;
+    case 'KeyB': if (A && isKerbalVessel(A)) Game.board(); break;
+    case 'KeyF': if (A && isKerbalVessel(A)) Game.plantFlag(); break;
     case 'KeyG': Game.toggleLegs(); break;
     case 'KeyM': Game.toggleMap(); break;
     case 'KeyZ': if (A) A.throttle = 1; break;

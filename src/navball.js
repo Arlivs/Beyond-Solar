@@ -45,7 +45,7 @@ function navballTexture() {
 function markerTex(kind) {
   return canvasTex(128, 128, (x) => {
     x.translate(64, 64); x.lineWidth = 7; x.lineCap = 'round';
-    const col = { pro: '#ffe23a', retro: '#ffe23a', normal: '#e04bff', anti: '#e04bff', radout: '#3ad8ff', radin: '#3ad8ff', node: '#3a8cff', target: '#ff5bd2' }[kind];
+    const col = { pro: '#ffe23a', retro: '#ffe23a', normal: '#e04bff', anti: '#e04bff', radout: '#3ad8ff', radin: '#3ad8ff', node: '#3a8cff', target: '#ff5bd2', antitarget: '#ff5bd2' }[kind];
     x.strokeStyle = col; x.fillStyle = col;
     const circle = (r) => { x.beginPath(); x.arc(0, 0, r, 0, TAU); x.stroke(); };
     switch (kind) {
@@ -57,6 +57,7 @@ function markerTex(kind) {
       case 'radin': circle(26); for (const a of [45, 135, 225, 315]) { const r = a * DEG; x.beginPath(); x.moveTo(Math.cos(r) * 8, Math.sin(r) * 8); x.lineTo(Math.cos(r) * 26, Math.sin(r) * 26); x.stroke(); } break;
       case 'node': x.lineWidth = 8; x.beginPath(); x.arc(0, 0, 26, 0.3, 1.27); x.stroke(); x.beginPath(); x.arc(0, 0, 26, 1.87, 2.84); x.stroke(); x.beginPath(); x.arc(0, 0, 26, 3.44, 4.41); x.stroke(); x.beginPath(); x.arc(0, 0, 26, 5.01, 5.98); x.stroke(); x.beginPath(); x.arc(0, 0, 5, 0, TAU); x.fill(); break;
       case 'target': circle(24); x.beginPath(); x.arc(0, 0, 9, 0, TAU); x.stroke(); break;
+      case 'antitarget': circle(24); for (const a of [45, 135, 225, 315]) { const r = a * DEG; x.beginPath(); x.moveTo(Math.cos(r) * 6, Math.sin(r) * 6); x.lineTo(Math.cos(r) * 24, Math.sin(r) * 24); x.stroke(); } break;
     }
   });
 }
@@ -69,7 +70,7 @@ function initNavball() {
   NB.ball = new THREE.Mesh(new THREE.SphereGeometry(1, 64, 32), mat);
   NB.ball.matrixAutoUpdate = false;
   NB.scene.add(NB.ball);
-  for (const k of ['pro', 'retro', 'normal', 'anti', 'radout', 'radin', 'node', 'target']) {
+  for (const k of ['pro', 'retro', 'normal', 'anti', 'radout', 'radin', 'node', 'target', 'antitarget']) {
     const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: markerTex(k), depthTest: false, toneMapped: false, transparent: true }));
     s.scale.set(0.34, 0.34, 1); s.renderOrder = 10; s.visible = false;
     NB.scene.add(s); NB.markers[k] = s;

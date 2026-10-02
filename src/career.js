@@ -3,19 +3,119 @@
 
 const SAVE_VERSION = 1;
 
-function newGame(mode, name) {
+// opts: { start: ut of the starting date, race: true for the 1957 space race (rival + build times) }
+function newGame(mode, name, opts) {
+  opts = opts || {};
   const g = {
-    v: SAVE_VERSION, mode, name: name || (mode === 'career' ? 'Карьера' : 'Песочница'), created: Date.now(), ut: 0,
+    v: SAVE_VERSION, mode, name: name || (opts.race ? 'Космическая гонка' : mode === 'career' ? 'Карьера' : 'Песочница'), created: Date.now(),
+    ut: opts.start != null ? kscMorning(opts.start) : 0, race: opts.race ? { items: {} } : null, builds: [],
     funds: 25000, science: 0, rep: 0,
     techs: mode === 'career' ? ['start'] : TECH.map(t => t.id),
     subjects: {}, milestones: {}, records: { alt: 0 },
     contracts: { offered: [], active: [], done: [], failed: [], seq: 1, lastGen: -1e9 },
     crafts: {}, vessels: [], lastCraft: null, stats: { launches: 0, recoveries: 0 },
   };
+  initCrew(g);
   if (mode === 'career') refreshOffers(g);
   return g;
 }
 const isCareer = (g) => g.mode === 'career';
+// first moment after t when the sun is ~15 degrees up over the space centre (a morning start)
+function kscMorning(t) {
+  const E = BODY.earth, up0 = V.norm(surfacePoint(E, KSC.lat, KSC.lon, 0));
+  const elev = (tt) => V.dot(bodyFixedToInertial(E, tt, up0), V.norm(V.neg(bodyAbsPos(E, tt))));
+  for (let k = 0; k <= 400; k++) { const tt = t + E.rotPeriod * k / 400, a = elev(tt), b = elev(tt + E.rotPeriod / 400); if (a < 0.26 && b >= 0.26) return tt; }
+  return t;
+}
+
+// ---- astronaut corps ----
+// status: ready | flight (aboard vessel c.vessel) | kia | missing (stranded, waiting for rescue)
+const CREW_ROLES = { pilot: 'Пилот', engineer: 'Инженер', scientist: 'Учёный' };
+const CREW_ROLE_HINT = {
+  pilot: 'Режимы SAS на кораблях без зонда: ур. 0 — стабилизация, 1 — прогрейд/ретрогрейд, 2 — нормаль и радиальные, 3 — цель и манёвр.',
+  engineer: 'В открытом космосе перепаковывает использованные парашюты.',
+  scientist: 'Перезапускает одноразовые эксперименты (гель, материаловедение); +25% к науке экипажа.',
+};
+const CREW_NAMES = ['Вера Ковалёва', 'Игорь Светлов', 'Марк Ветров', 'Лидия Громова', 'Олег Северов', 'Анна Лучинина', 'Пётр Звягин', 'Нина Орехова',
+  'Тимур Каримов', 'Елена Сабурова', 'Глеб Рогов', 'Дарья Кедрова', 'Савва Ершов', 'Ирина Полозова', 'Артём Березин', 'Майя Тихонова', 'Роман Шестаков',
+  'Ксения Былинкина', 'Лев Ярцев', 'Полина Зарецкая'];
+const XP_LEVELS = [2, 8, 16, 32, 64];
+function crewLevel(c) { let l = 0; while (l < XP_LEVELS.length && c.xp >= XP_LEVELS[l]) l++; return l; }
+function crewById(g, id) { return (g.crew || []).find(c => c.id === id) || null; }
+function newKerbal(g, role, name) {
+  g.crewSeq = (g.crewSeq || 0) + 1;
+  const used = new Set((g.crew || []).map(c => c.name));
+  name = name || CREW_NAMES.find(n => !used.has(n)) || 'Космонавт ' + g.crewSeq;
+  return { id: 'k' + g.crewSeq, name, role, xp: 0, status: 'ready', vessel: null, flights: 0, log: {} };
+}
+function initCrew(g) {
+  if (g.crew) return;
+  g.crew = [];
+  for (const r of ['pilot', 'pilot', 'engineer', 'scientist']) g.crew.push(newKerbal(g, r));
+  g.crew[0].xp = g.crew[1].xp = 2;          // the first pilots can already hold prograde
+}
+function hireCost(g) { return 9000 + 3500 * g.crew.filter(c => c.status === 'ready' || c.status === 'flight').length; }
+function hireKerbal(g, role) {
+  const cost = isCareer(g) ? hireCost(g) : 0;
+  if (isCareer(g) && g.funds < cost) return null;
+  spend(g, cost);
+  const k = newKerbal(g, role); g.crew.push(k);
+  return k;
+}
+// XP for having been somewhere: Earth gives only for space / orbit, other bodies scale with difficulty
+function xpFor(bodyId, kind) {
+  const b = BODY[bodyId];
+  if (bodyId === 'earth') return { space: 0.5, orbit: 1 }[kind] || 0;
+  return ({ soi: 1, orbit: 1.5, landed: 2.3, flag: 0.5 }[kind] || 0) * (1 + b.diff * 0.5);
+}
+// a crew member experienced something (logged; turned into XP when they come home)
+function crewLog(g, id, bodyId, kind) {
+  const c = crewById(g, id); if (!c) return;
+  const L = c.log[bodyId] || (c.log[bodyId] = {});
+  if (!L[kind]) L[kind] = 1;
+}
+function crewOf(v) { const out = []; for (const p of v.parts) if (!p.dead && p.crew) out.push(...p.crew); return out; }
+// recovered at home: logged experience becomes XP
+function crewHome(g, id) {
+  const c = crewById(g, id); if (!c) return 0;
+  let gain = 0;
+  for (const b in c.log) for (const k in c.log[b]) if (c.log[b][k] === 1) { gain += xpFor(b, k); c.log[b][k] = 2; }
+  const lv = crewLevel(c);
+  c.xp += gain; c.flights++; c.status = 'ready'; c.vessel = null;
+  return { gain, up: crewLevel(c) > lv };
+}
+function crewLost(g, id) {
+  const c = crewById(g, id); if (!c) return;
+  if (isCareer(g)) { c.status = 'kia'; c.vessel = null; g.rep -= 5; }
+  else { c.status = 'ready'; c.vessel = null; }       // sandbox: nobody really dies
+}
+// seat ready crew in a new vessel's pods: the design's explicit choice, otherwise pilots first
+function assignCrew(g, v, design) {
+  const ready = g.crew.filter(c => c.status === 'ready');
+  const take = (id) => { const i = ready.findIndex(c => c.id === id); if (i < 0) return null; return ready.splice(i, 1)[0]; };
+  const pods = v.parts.filter(p => PART[p.id].command && PART[p.id].command.crew > 0);
+  for (const p of pods) {
+    p.crew = [];
+    const want = design.crew && design.crew[p.uid];
+    if (want) { for (const id of want) { const c = take(id); if (c && p.crew.length < PART[p.id].command.crew) p.crew.push(c.id); } continue; }
+    while (p.crew.length < PART[p.id].command.crew && ready.length) {
+      const i = Math.max(0, p.crew.length === 0 ? ready.findIndex(c => c.role === 'pilot') : 0);
+      p.crew.push(ready.splice(i, 1)[0].id);
+    }
+  }
+  for (const id of crewOf(v)) { const c = crewById(g, id); c.status = 'flight'; c.vessel = v.id; }
+}
+// best pilot level aboard; null = no restriction (sandbox, probe core, or a pre-crew save)
+function sasLevel(g, v) {
+  if (!isCareer(g)) return null;
+  if (v.parts.some(p => !p.dead && PART[p.id].command && !PART[p.id].command.crew)) return null;
+  if (v.parts.some(p => !p.dead && PART[p.id].command && PART[p.id].command.crew && !p.crew)) return null;
+  let lv = -1;
+  for (const id of crewOf(v)) { const c = crewById(g, id); if (c && c.role === 'pilot') lv = Math.max(lv, crewLevel(c)); }
+  return lv;
+}
+const SAS_LEVEL = { stab: 0, pro: 1, retro: 1, normal: 2, anti: 2, radout: 2, radin: 2, target: 3, antitarget: 3, node: 3 };
+function sasAllowed(g, v, mode) { const lv = sasLevel(g, v); return lv == null || (mode === 'stab' ? lv >= -1 : lv >= SAS_LEVEL[mode]); }
 
 // ---- tech ----
 function partUnlocked(g, id) { return g.techs.includes(PART[id].tech); }
@@ -33,23 +133,24 @@ function spend(g, x) { if (!isCareer(g)) return true; if (g.funds < x) return fa
 function earn(g, x) { if (isCareer(g)) g.funds += x; }
 
 // ---- science ----
-function subjectId(exp, bodyId, sit) { return exp + '@' + bodyId + ':' + sit; }
-function subjectTitle(exp, bodyId, sit) { return `${EXPERIMENTS[exp].name}: ${BODY[bodyId].name}, ${SIT_NAMES[sit]}`; }
+// subjects: experiment x body x situation, plus the biome for landed / low-flight data
+function subjectId(exp, bodyId, sit, biome) { return exp + '@' + bodyId + ':' + sit + (biome ? '/' + biome : ''); }
+function subjectTitle(exp, bodyId, sit, biome) { const bm = biome && biomeById(BODY[bodyId], biome); return `${EXPERIMENTS[exp].name}: ${BODY[bodyId].name}${bm ? ' (' + bm.name + ')' : ''}, ${SIT_NAMES[sit]}`; }
 function sciMult(body, sit) { return body.sci[SIT_INDEX[sit]] || 0; }
-function subjectRemaining(g, exp, bodyId, sit) {
+function subjectRemaining(g, exp, bodyId, sit, biome) {
   const e = EXPERIMENTS[exp], m = sciMult(BODY[bodyId], sit);
-  return Math.max(0, e.cap * m - (g.subjects[subjectId(exp, bodyId, sit)] || 0));
+  return Math.max(0, e.cap * m - (g.subjects[subjectId(exp, bodyId, sit, biome)] || 0));
 }
 // value if credited now
 function dataValue(g, d, transmit) {
   const e = EXPERIMENTS[d.exp], m = sciMult(BODY[d.body], d.sit);
-  const full = e.base * m * (transmit ? e.xmit : 1);
-  return Math.min(full, subjectRemaining(g, d.exp, d.body, d.sit));
+  const full = e.base * m * (transmit ? e.xmit : 1) * (d.bonus || 1);
+  return Math.min(full, subjectRemaining(g, d.exp, d.body, d.sit, d.biome));
 }
 function creditData(g, d, transmit) {
   const x = dataValue(g, d, transmit);
   if (x <= 0) return 0;
-  const id = subjectId(d.exp, d.body, d.sit);
+  const id = subjectId(d.exp, d.body, d.sit, d.biome);
   g.subjects[id] = (g.subjects[id] || 0) + x;
   if (isCareer(g)) g.science += x;
   contractEvent(g, 'science', { exp: d.exp, body: d.body, sit: d.sit });
@@ -61,23 +162,38 @@ function expAvailable(exp, v) {
   if (!e.sits.split(' ').includes(sit)) return { ok: false, why: 'не работает ' + SIT_NAMES[sit] };
   if (e.needAtm && !b.atm) return { ok: false, why: 'нет атмосферы' };
   if (sciMult(b, sit) <= 0) return { ok: false, why: 'здесь нечего изучать' };
-  return { ok: true, sit };
+  if (e.auto) return { ok: false, why: 'идёт само на орбите' };
+  return { ok: true, sit, biome: vesselBiome(v, v._ut != null ? v._ut : 0) };
 }
 // run the experiment of part p (or crew report from pod); returns data or {error}
 function runExperiment(g, v, p, exp) {
   const a = expAvailable(exp, v);
   if (!a.ok) return { error: a.why };
   const e = EXPERIMENTS[exp];
-  if (exp === 'crew') {
-    if (p.data.some(d => d.exp === 'crew' && d.body === v.body.id && d.sit === a.sit)) return { error: 'такой доклад уже есть' };
+  if (exp === 'crew' || e.byEva) {
+    if (p.data.some(d => d.exp === exp && d.body === v.body.id && d.sit === a.sit && d.biome === a.biome)) return { error: 'такие данные уже есть' };
+    if (e.solid && (v.body.gas || !v.body.terrain)) return { error: 'здесь нет грунта' };
   } else {
     if (p.data.length) return { error: 'данные уже собраны' };
     if (e.single && p.st.used) return { error: 'эксперимент израсходован' };
   }
-  const d = { exp, body: v.body.id, sit: a.sit, title: subjectTitle(exp, v.body.id, a.sit) };
+  const d = { exp, body: v.body.id, sit: a.sit, biome: a.biome || undefined, title: subjectTitle(exp, v.body.id, a.sit, a.biome) };
+  // science done by a scientist (crew / EVA reports, samples) is worth a quarter more
+  if (exp === 'crew' || e.byEva) { const ids = p.crew || []; if (ids.some(id => { const c = crewById(g, id); return c && c.role === 'scientist'; })) d.bonus = 1.25; }
   p.data.push(d);
   if (e.single) p.st.used = true;
   return { data: d, value: dataValue(g, d, false), xmit: dataValue(g, d, true) };
+}
+
+// mapping science: credited as coverage grows (5% steps); returns the new science
+function mappingCredit(g, bodyId, coverage) {
+  const b = BODY[bodyId], cap = EXPERIMENTS.mapping.cap * sciMult(b, 'SL');
+  const id = subjectId('mapping', bodyId, 'SL'), have = g.subjects[id] || 0;
+  const x = cap * Math.floor(coverage * 20) / 20 - have;
+  if (x <= 0.01) return 0;
+  g.subjects[id] = have + x;
+  if (isCareer(g)) g.science += x;
+  return x;
 }
 
 // ---- recovery ----
@@ -101,6 +217,8 @@ function recoverVessel(g, v) {
   }
   earn(g, funds);
   g.stats.recoveries++;
+  const crew = [];
+  for (const id of crewOf(v)) { const r = crewHome(g, id); const c = crewById(g, id); if (c) crew.push([c.name, r]); }
   // returns
   const ret = [];
   const fb = v.flags.bodies || {};
@@ -110,8 +228,8 @@ function recoverVessel(g, v) {
     ret.push(milestone(g, 'return_' + id));
     contractEvent(g, 'recovered', { flags: fb, body: id });
   }
-  contractEvent(g, 'recovered', { flags: fb });
-  return { funds: isCareer(g) ? funds : 0, sci, items, factor: f, milestones: ret.filter(Boolean) };
+  contractEvent(g, 'recovered', { flags: fb, crew: crewOf(v) });
+  return { funds: isCareer(g) ? funds : 0, sci, items, factor: f, milestones: ret.filter(Boolean), crew };
 }
 
 // ---- milestones ----
@@ -122,12 +240,16 @@ function milestoneDef(id) {
     alt_40k: ['Высота 40 км', 5000, 4, 2],
     space: ['Первый выход в космос', 9000, 6, 5], orbit_earth: ['Первая орбита Земли', 15000, 10, 8],
     return_orbit: ['Возвращение с орбиты', 10000, 8, 6], escape_earth: ['Покинуть сферу Земли', 18000, 12, 8],
+    dock: ['Первая стыковка', 20000, 12, 10], eva: ['Первый выход в открытый космос', 15000, 10, 8],
   };
   if (fixed[id]) return fixed[id];
-  const m = id.match(/^(soi|orbit|land|return)_(\w+)$/);
+  if (id === 'station') return ['Орбитальная станция', 30000, 15, 12];
+  const m = id.match(/^(orbit_crew|land_crew|rover|soi|orbit|land|return|walk|flag)_(\w+)$/);
   if (!m || !BODY[m[2]]) return null;
   const b = BODY[m[2]], k = 1 + b.diff * 0.8;
-  const T = { soi: ['Пролёт: ', 8000, 6], orbit: ['Орбита: ', 12000, 10], land: ['Посадка: ', 20000, 18], return: ['Возвращение с тела: ', 24000, 14] }[m[1]];
+  const T = { soi: ['Пролёт: ', 8000, 6], orbit: ['Орбита: ', 12000, 10], land: ['Посадка: ', 20000, 18], return: ['Возвращение с тела: ', 24000, 14],
+    walk: ['Прогулка по поверхности: ', 15000, 12], flag: ['Флаг: ', 9000, 8], orbit_crew: ['Люди на орбите: ', 16000, 10], land_crew: ['Люди на поверхности: ', 30000, 22],
+    rover: ['Ровер: ', 15000, 12] }[m[1]];
   return [T[0] + b.name, Math.round(T[1] * k / 100) * 100, Math.round(T[2] * k), Math.round(5 * k)];
 }
 function milestone(g, id) {
@@ -137,6 +259,8 @@ function milestone(g, id) {
   g.milestones[id] = g.ut || 1;
   earn(g, d[1]);
   if (isCareer(g)) { g.science += d[2]; g.rep += d[3]; }
+  const race = raceOnMilestone(g, id);
+  if (race) (g._notify || (() => {}))(race.first ? `🏆 Мы первые: ${race.it.title}! +${fmtMoney(race.r.funds)}, +${race.r.rep} репутации` : `${race.it.title}: соперник успел раньше`);
   return { id, title: d[0], funds: d[1], sci: d[2] };
 }
 // called ~1 Hz by the flight scene; returns newly reached milestones
@@ -157,6 +281,22 @@ function progressTick(g, v, ut) {
   if (el.e < 1 && el.rp > safe && el.ra < b.soi && !v.landed) { f.orbit = true; out.push(milestone(g, 'orbit_' + b.id)); }
   if (v.landed && !v.prelaunch && b.id !== 'earth') { f.landed = true; out.push(milestone(g, 'land_' + b.id)); }
   if (v.landed && !v.prelaunch && b.id === 'earth' && v.launchUT != null) f.landed = true;
+  if (v.parts.some(p => !p.dead && PART[p.id].kerbal)) {
+    if (sciSituation(v)[0] === 'S') out.push(milestone(g, 'eva'));
+    if ((v.landed || v.inContact) && b.id !== 'earth') out.push(milestone(g, 'walk_' + b.id));
+  }
+  const crewed = isCrewed(v) || v.parts.some(p => !p.dead && PART[p.id].kerbal);
+  if (crewed && f.orbit && el.e < 1 && el.rp > safe && !v.landed) out.push(milestone(g, 'orbit_crew_' + b.id));
+  if (crewed && (v.landed || v.inContact) && !v.prelaunch && b.id !== 'earth') out.push(milestone(g, 'land_crew_' + b.id));
+  if (b.id !== 'earth' && v.inContact && v.parts.some(p => !p.dead && PART[p.id].gear && PART[p.id].gear.motor) &&
+    V.len(V.sub(v.v, V.cross(bodyOmega(b), v.r))) > 2) out.push(milestone(g, 'rover_' + b.id));
+  if (crewed && f.orbit && !v.landed && v.edges.some(e => e.dock && !e.cut)) out.push(milestone(g, 'station'));
+  for (const id of crewOf(v)) {
+    if (b.id !== 'earth') crewLog(g, id, b.id, 'soi');
+    else if (alt > b.atm.top) crewLog(g, id, 'earth', 'space');
+    if (f.orbit && v.body === b && el.e < 1 && el.rp > safe) crewLog(g, id, b.id, 'orbit');
+    if (v.landed && !v.prelaunch && b.id !== 'earth') crewLog(g, id, b.id, 'landed');
+  }
   contractTick(g, v, ut, el);
   return out.filter(Boolean);
 }
@@ -166,6 +306,7 @@ function isDescendant(b, anc) { for (let c = b; c; c = c.parent) if (c === anc) 
 const CONTRACT_TYPES = {
   alt: 'Рекорд высоты', space: 'Выход в космос', orbit: 'Выход на орбиту', flyby: 'Пролёт', land: 'Посадка',
   return: 'Посадка и возвращение', science: 'Научные данные', satellite: 'Спутник',
+  eva: 'Выход в открытый космос', flag: 'Флаг', rescue: 'Спасение', dock: 'Стыковка',
 };
 function reachableBodies(g) {
   let maxDiff = 0;
@@ -179,9 +320,13 @@ function makeContract(g, rnd) {
   const types = [];
   if (!g.milestones.space) { types.push('alt', 'alt', 'space', 'science'); }
   else if (!g.milestones.orbit_earth) { types.push('orbit', 'science', 'science'); }
-  else types.push('orbit', 'flyby', 'land', 'return', 'science', 'science', 'satellite');
+  else {
+    types.push('orbit', 'flyby', 'land', 'return', 'science', 'science', 'satellite', 'eva', 'rescue', 'flag');
+    if (g.techs.includes('docking')) types.push('dock');
+  }
   const type = pick(types);
-  let b = pick(bodies.filter(x => type === 'land' || type === 'return' ? !x.gas : true));
+  const solid = (x) => !x.gas && x.vis.type !== 'star';
+  let b = pick(bodies.filter(x => type === 'land' || type === 'return' || type === 'flag' ? solid(x) && x.id !== 'earth' : type === 'rescue' ? x.id === 'earth' || x.id === 'moon' : type === 'dock' ? solid(x) : true));
   if (!b) b = BODY.earth;
   if ((type === 'flyby' || type === 'land' || type === 'return') && b.id === 'earth') b = bodies.find(x => x.id === 'moon') || BODY.moon;
   const k = 1 + b.diff * 0.9;
@@ -221,6 +366,22 @@ function makeContract(g, rnd) {
       c.title = `${EXPERIMENTS[exp].name}: ${b.name}`; c.desc = `Получите данные «${EXPERIMENTS[exp].name}» ${SIT_NAMES[sit]} (${b.name}) и передайте их или верните на Землю.`;
       funds = 6000 * k * (1 + sciMult(b, sit) * 0.15); sci = 6 * k; break;
     }
+    case 'eva':
+      c.title = `Выход в открытый космос: ${b.name}`; c.desc = `Выйдите в открытый космос на орбите или в сфере влияния тела «${b.name}» (кнопка «Выход» у члена экипажа).`;
+      funds = 16000 * k; sci = 6 * k; break;
+    case 'flag':
+      c.title = `Флаг: ${b.name}`; c.desc = `Высадитесь на «${b.name}», выйдите из капсулы и поставьте флаг (F).`;
+      funds = 45000 * k; sci = 22 * k; break;
+    case 'dock':
+      c.title = `Стыковка на орбите: ${b.name}`; c.desc = `Состыкуйте два аппарата на орбите тела «${b.name}». Нужны стыковочные узлы одного размера.`;
+      funds = 30000 * k; sci = 12 * k; break;
+    case 'rescue': {
+      const kn = newKerbal(g, pick(['pilot', 'engineer', 'scientist']));
+      c.kerbal = { name: kn.name, role: kn.role };
+      c.alt = b.id === 'earth' ? 90000 + rnd() * 160000 : 15000 + rnd() * 70000;
+      c.title = `Спасение: ${kn.name}`; c.desc = `${CREW_ROLES[kn.role]} ${kn.name} застрял(а) в капсуле без топлива на орбите «${b.name}» около ${fmtDist(c.alt)}. Сблизьтесь, заберите космонавта через выход в открытый космос (нужно свободное место) и верните на Землю. Спасённый вступит в отряд.`;
+      funds = 32000 * k; sci = 6 * k; break;
+    }
     case 'satellite': {
       const base = b.R + (b.atm ? b.atm.top : b.R * 0.05);
       const lo = base + (b.R * (0.1 + rnd() * 0.6));
@@ -259,9 +420,22 @@ function acceptContract(g, id) {
   const c = C.offered.splice(i, 1)[0];
   c.state = 'active'; c.accepted = g.ut; c.deadline = g.ut + c.days * DAY;
   C.active.push(c);
+  if (c.type === 'rescue') spawnRescue(g, c);
   earn(g, c.advance);
   refreshOffers(g);
   return true;
+}
+// a stranded astronaut in a dead capsule on a circular equatorial orbit
+function spawnRescue(g, c) {
+  const k = newKerbal(g, c.kerbal.role, c.kerbal.name);
+  k.status = 'missing'; g.crew.push(k); c.kid = k.id;
+  const b = BODY[c.body], v = buildVessel(makeDesign(`Капсула «${k.name}»`, ['pod_k1']), `Капсула «${k.name}»`);
+  v.parts[0].crew = [k.id]; v.parts[0].res.MONO = 0; v.parts[0].res.ELEC = 5;
+  const R = b.R + c.alt, vc = Math.sqrt(b.mu / R), a = Math.random() * TAU;
+  v.body = b; v.r = [R * Math.cos(a), R * Math.sin(a), 0]; v.v = [-vc * Math.sin(a), vc * Math.cos(a), 0];
+  v.q = Q.axisAngle([1, 0, 0], Math.random() * 3); v.w = [0, 0, 0];
+  k.vessel = v.id;
+  g.vessels.push(serializeVessel(v));
 }
 function declineContract(g, id) {
   const C = g.contracts; C.offered = C.offered.filter(c => c.id !== id); refreshOffers(g);
@@ -288,7 +462,9 @@ function contractTick(g, v, ut, el) {
     if (ut > c.deadline) { cancelContract(g, c.id); (g._notify || (() => {}))('Контракт провален (срок): ' + c.title); continue; }
     if (c.body !== b.id) continue;
     let ok = false;
+    const evaOn = v.parts.some(p => !p.dead && PART[p.id].kerbal);
     switch (c.type) {
+      case 'eva': ok = evaOn && !v.landed && !v.inContact && (!b.atm || alt > b.atm.top); break;
       case 'alt': ok = alt > c.alt; break;
       case 'space': ok = b.atm && alt > b.atm.top; break;
       case 'orbit': ok = el.e < 1 && el.rp > b.R + (b.atm ? b.atm.top : 5000) && el.ra < b.soi && !v.landed; break;
@@ -309,8 +485,20 @@ function contractEvent(g, type, d) {
   for (const c of [...g.contracts.active]) {
     if (type === 'science' && c.type === 'science' && c.exp === d.exp && c.body === d.body && c.sit === d.sit) completeContract(g, c);
     if (type === 'recovered' && c.type === 'return' && d.flags[c.body] && d.flags[c.body].landed) completeContract(g, c);
+    if (type === 'recovered' && c.type === 'rescue' && d.crew && d.crew.includes(c.kid)) completeContract(g, c);
+    if (type === 'flag' && c.type === 'flag' && c.body === d.body) completeContract(g, c);
+    if (type === 'docked' && c.type === 'dock' && d.a.body.id === c.body && !d.a.landed) completeContract(g, c);
   }
 }
+
+// ---- alarms (time warp stops before them) ----
+function addAlarm(g, a) {
+  g.alarms = g.alarms || [];
+  a.id = 'a' + (g.alarmSeq = (g.alarmSeq || 0) + 1);
+  g.alarms.push(a); g.alarms.sort((x, y) => x.t - y.t);
+  return a;
+}
+function removeAlarm(g, id) { g.alarms = (g.alarms || []).filter(a => a.id !== id); }
 
 // ---- vessel (de)serialization ----
 function serializeVessel(v) {
@@ -318,10 +506,10 @@ function serializeVessel(v) {
     id: v.id, name: v.name, body: v.body.id, r: v.r, v: v.v, q: v.q, w: v.w || [0, 0, 0], lock: v.lock || null,
     landed: !!v.landed, prelaunch: !!v.prelaunch, parts: v.parts.map(p => ({
       id: p.id, uid: p.uid, k: p.k, pos: p.pos, dir: p.dir, ang: p.ang, role: p.role, res: p.res, T: p.T, st: p.st, data: p.data,
-      dead: !!p.dead, pEdge: p.pEdge,
+      dead: !!p.dead, pEdge: p.pEdge, q: p.q || undefined, portDir: p.portDir, origName: p.origName, crew: p.crew,
     })), edges: v.edges, stages: v.stages, stageIdx: v.stageIdx, throttle: 0, sas: v.sas, sasMode: v.sasMode, rcs: v.rcs,
     flags: v.flags, maxAlt: v.maxAlt, design: v.design, launchUT: v.launchUT, debris: !!v.debris, nodes: v.nodes || [],
-    craftName: v.craftName || null,
+    craftName: v.craftName || null, ctrlPort: v.ctrlPort != null ? v.ctrlPort : null, site: v.site || null,
   };
 }
 function deserializeVessel(s) {
@@ -340,6 +528,7 @@ function lsGet(k, d) { try { const x = localStorage.getItem(LS_PREFIX + k); retu
 function lsSet(k, val) { try { localStorage.setItem(LS_PREFIX + k, JSON.stringify(val)); return true; } catch (e) { return false; } }
 function lsDel(k) { try { localStorage.removeItem(LS_PREFIX + k); } catch (e) { /* ignore */ } }
 function gameToJSON(g) {
+  flushScans(g);
   const o = {};
   for (const k in g) if (k[0] !== '_') o[k] = g[k];
   return JSON.parse(JSON.stringify(o));
@@ -355,6 +544,8 @@ function saveSlot(slot, g, label) {
 function loadSlot(slot) {
   const g = lsGet('save.' + slot, null);
   if (!g || g.v !== SAVE_VERSION) return null;
+  initCrew(g);                 // saves from before the astronaut corps
+  g.builds = g.builds || [];
   return g;
 }
 function listSaves() { return lsGet('saves', []); }
