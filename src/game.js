@@ -3,7 +3,7 @@
 
 const Game = {
   g: null, screen: 'menu', world: null, keys: {}, precise: false, nodeStep: 1, last: 0,
-  warpLevels: [1, 5, 10, 50, 100, 1000, 10000, 100000, 1000000, 10000000],
+  warpLevels: [1, 5, 10, 50, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000],
   physLevels: [1, 2, 3, 4],
   mouse: { down: false, x: 0, y: 0, moved: 0, btn: 0 },
 };
@@ -34,6 +34,7 @@ function loop(now) {
   try {
     adaptResolution(dt);
     sndFrame(Game.screen);
+    setOrigin(sceneSystem());
     switch (Game.screen) {
       case 'menu': renderMenuBg(now); break;
       case 'ksc': case 'rnd': case 'mc': renderKscBg(); break;
@@ -44,6 +45,7 @@ function loop(now) {
     }
   } catch (e) {
     console.error(e);
+    Game.lastError = e.message + ' @ ' + String(e.stack || '').split('\n')[1];   // read by the test harness
     if (!Game._errShown) { Game._errShown = true; ui.toast('Ошибка: ' + esc(e.message), 'bad', 8000); setTimeout(() => { Game._errShown = false; }, 8000); }
   }
 }
@@ -106,6 +108,7 @@ Game.toMenu = function () {
   ui.menu();
 };
 Game.newGame = function (mode, opts) {
+  setSciFi(opts && opts.scifi);
   Game.g = newGame(mode, null, opts);
   Game.g._notify = (m) => ui.toast(m, 'acc', 5000);
   Game.autosave();
@@ -127,6 +130,7 @@ Game.skipTo = function (t1) {
     for (let k = 0; k < 40 && tt < t1; k++) { const r = railsAdvance(v, tt, t1); if (r.event === 'impact') { v.destroyed = true; break; } if (!r.event) break; tt = r.t; }
   }
   scanAll(vs, g.ut, t1);
+  if (SCIFI.on) for (const v of vs) if (!v.destroyed) produceExotic(v, t1 - g.ut);
   for (const v of vs) if (v.destroyed) loseCrew(v.parts);
   g.vessels = vs.filter(v => !v.destroyed).map(serializeVessel);
   g.ut = t1;
@@ -252,7 +256,10 @@ Game.launch = function (design, site, fromBuild) {
   v.craftName = design.name;
   assignCrew(g, v, design);
   site = site || design.site || 'pad';
-  if (site === 'runway') placeOnRunway(v, g.ut); else placeOnPad(v, g.ut);
+  // a space base (science fiction): roll out next to an orbital shipyard, or beside it on the ground
+  const yard = typeof site === 'string' && site.startsWith('yard:') ? W.vessels.find(x => x.id === site.slice(5) && !x.destroyed) : null;
+  if (yard) placeAtYard(v, yard, g.ut);
+  else if (site === 'runway') placeOnRunway(v, g.ut); else placeOnPad(v, g.ut);
   // landing gear starts extended, landing legs folded
   if (v.parts.some(p => PART[p.id].gear && PART[p.id].gear.retract)) v.legs = true;
   v.loaded = true;
@@ -267,6 +274,23 @@ Game.launch = function (design, site, fromBuild) {
   const pods = v.parts.filter(p => p.crew);
   if (pods.length && !crewOf(v).length) ui.toast(hasControl(v) ? 'Капсула без экипажа: свободных космонавтов нет' : 'Капсула без экипажа и без зонда: кораблём нельзя управлять', 'bad', 6000);
 };
+
+// a new vessel beside a shipyard: 250 m behind it on the same orbit, or 150 m from it on the ground
+function placeAtYard(v, yard, ut) {
+  if (yard.lock) {
+    const b = yard.body, ll = latLon(b, ut, yard.r);
+    placeOnPad(v, ut, { body: b.id, lat: ll.lat, lon: ll.lon + 150 / (b.R * Math.max(Math.cos(ll.lat), 0.05)) });
+    v.prelaunchHold = false;
+    return;
+  }
+  v.body = yard.body;
+  v.r = V.addS(yard.r, V.norm(yard.v), -250); v.v = yard.v.slice();
+  v.q = Q.fromTo([0, 1, 0], V.norm(yard.v)); v.w = [0, 0, 0];
+  v.lock = null; v.landed = false; v.prelaunch = false; v.prelaunchHold = false; v.situation = 'SPACE';
+  v.site = 'yard';
+}
+// shipyards among the vessels in flight (science fiction)
+function shipyards(g) { return SCIFI.on ? g.vessels.filter(s => !s.debris && s.parts.some(p => !p.dead && PART[p.id] && PART[p.id].yard)) : []; }
 
 function enterFlight() {
   mapSetVisible(false);
@@ -304,6 +328,7 @@ function updateLoaded(force) {
     keep.push(v);
   }
   W.vessels = keep;
+  for (const id in BODY) if (BODY[id].void && !keep.some(v => v.body === BODY[id])) dropVoid(BODY[id]);   // open-space frames nobody uses
   // views
   for (const v of W.vessels) {
     if (v.loaded && !W.views.has(v.id)) { const vw = new VesselView(v); RV.scene.add(vw.group); W.views.set(v.id, vw); }
@@ -325,7 +350,9 @@ function railsAllowed(A) {
     const el = elFromState(A.r, A.v, A.body.mu, Game.g.ut);
     if (el.rp < A.body.R + A.body.hMax) return false;
   }
-  if (thrustWanted(A) && (A.throttle > 0 || A.parts.some(p => !p.dead && p.st.eng && p.st.eng.on && !p.st.eng.out && !PART[p.id].engine.throttle))) return false;
+  // a burn (or a deployed sail) goes on under warp while SAS holds the attitude
+  if (thrustWanted(A) && (A.throttle > 0 || A.parts.some(p => !p.dead && p.st.eng && p.st.eng.on && !p.st.eng.out && !PART[p.id].engine.throttle))) return railsThrustOK(A);
+  if (sailDeployed(A)) return railsThrustOK(A);
   return true;
 }
 function railsWhyNot(A) {
@@ -333,8 +360,10 @@ function railsWhyNot(A) {
   if (A.body.atm && alt < A.body.atm.top) return 'в атмосфере — только физическое ускорение';
   if (A.inContact) return 'аппарат касается поверхности';
   if (A.body.terrain && alt < A.body.hMax + 2000) return 'орбита задевает рельеф';
-  return 'двигатели работают';
+  return 'тяга без SAS — включите SAS (T), чтобы жечь под ускорением';
 }
+// the two fastest rates (×10⁸, ×10⁹) only far from planets: in orbit around a star or between stars
+function warpCap(A) { return !A || A.lock || A.landed || A.body.star ? Game.warpLevels.length - 1 : Game.warpLevels.indexOf(10000000); }
 Game.warpUp = function (phys) {
   const W = Game.world; if (!W) return;
   const A = W.active;
@@ -345,7 +374,8 @@ Game.warpUp = function (phys) {
     return;
   }
   W.physWarp = 0;
-  W.warp = Math.min(Game.warpLevels.length - 1, W.warp + 1);
+  if (W.warp >= warpCap(A)) { if (warpCap(A) < Game.warpLevels.length - 1) ui.toast('×10⁸ и ×10⁹ — только вне сфер влияния планет', '', 2000); return; }
+  W.warp = Math.min(warpCap(A), W.warp + 1);
 };
 Game.warpDown = function () {
   const W = Game.world; if (!W) return;
@@ -420,7 +450,7 @@ function simulate(dt) {
   W.ctl = ctl;
   if (A && !A.destroyed) {
     if (ctl.thr) { A.throttle = clamp(A.throttle + ctl.thr * dt * 0.9, 0, 1); }
-    if (W.warp > 0 && A.throttle > 0 && thrustWanted(A)) { Game.stopWarp(); ui.toast('Ускорение времени остановлено: тяга', '', 1500); }
+    if (W.warp > 0 && A.throttle > 0 && thrustWanted(A) && !railsThrustOK(A)) { Game.stopWarp(); ui.toast('Ускорение времени остановлено: тяга без SAS', '', 1500); }
   }
   // auto warp-to
   if (W.warpTo != null) {
@@ -428,9 +458,26 @@ function simulate(dt) {
     if (rem <= 0.5) { Game.stopWarp(); ui.toast('Время манёвра близко', '', 2000); }
     else if (!A || railsAllowed(A)) {
       let lvl = 0;
-      for (let i = 1; i < Game.warpLevels.length; i++) if (Game.warpLevels[i] * dt * 4 < rem) lvl = i;
+      for (let i = 1; i <= warpCap(A); i++) if (Game.warpLevels[i] * dt * 4 < rem) lvl = i;
       if (lvl !== W.warp) { W.warp = lvl; W.physWarp = 0; if (lvl === 0) exitRailsLoaded(); }
     }
+  }
+  // warp bubble (science fiction): the ship is carried, everything else coasts on rails; time warp still applies
+  if (A && !A.destroyed && A.warpOn) {
+    const t0 = g.ut;
+    let t1 = alarmClamp(W, t0, t0 + dt * (W.warp > 0 ? Game.warpLevels[W.warp] : 1));
+    for (const v of W.vessels) if (v !== A && !v.rails && !v.destroyed) enterRails(v, t0);
+    A.rails = null; A.w = [0, 0, 0];
+    const res = warpAdvance(A, t0, t1);
+    t1 = res.t;
+    for (const v of W.vessels) if (v !== A && !v.destroyed) railsAdvance(v, t0, t1);
+    g.ut = t1; W.acc = 0; W.traj = null;
+    if (res.event) {
+      A.warpOn = false; W.warp = 0; W.warpTo = null; exitRailsLoaded(); W.trajT = -1;
+      ui.toast({ arrive: `Выход из варпа: ${res.body ? res.body.name : ''}`, close: `Выход из варпа: слишком близко к ${A.body.name}`, empty: 'Варп сорван: кончилась экзотическая материя',
+        power: 'Варп сорван: ядру не хватает тока' }[res.event], res.event === 'arrive' ? 'acc' : 'bad', 4000);
+    }
+    return;
   }
   if (W.warp > 0) {
     if (A && !A.destroyed && !railsAllowed(A)) { W.warp = 0; exitRailsLoaded(); ui.toast('Ускорение невозможно: ' + railsWhyNot(A), '', 2500); return; }
@@ -438,19 +485,24 @@ function simulate(dt) {
     let t1 = t0 + dt * Game.warpLevels[W.warp];
     if (W.warpTo != null) t1 = Math.min(t1, W.warpTo);
     t1 = alarmClamp(W, t0, t1);
-    for (const v of W.vessels) if (!v.rails && !v.destroyed) enterRails(v, t0);
+    for (const v of W.vessels) if (!v.rails && !v.destroyed) { if (v.body.void) { const vb = v.body; voidLeave(v); if (!W.vessels.some(o => o.body === vb)) dropVoid(vb); } enterRails(v, t0); }
+    if (W.warp > warpCap(A)) W.warp = warpCap(A);
     if (A && !A.destroyed) {
-      const res = railsAdvance(A, t0, t1);
+      const powered = !A.rails.landed && railsPowered(A);
+      const res = powered ? railsPoweredAdvance(A, t0, t1, 600) : railsAdvance(A, t0, t1);
+      if (powered) t1 = res.t;   // a heavy burn may not get through the whole warp step
       if (res.event) {
         t1 = res.t;
         W.warp = 0; W.warpTo = null;
         if (res.event === 'soi') ui.toast(`Сфера влияния: ${A.body.name}`, 'acc');
         if (res.event === 'atmo') ui.toast(`Вход в атмосферу: ${A.body.name}`, 'acc');
         if (res.event === 'impact') ui.toast(`Внимание: поверхность близко!`, 'bad');
+        if (res.event === 'burnout') ui.toast('Тяга прекратилась: кончилось топливо или ток', 'bad');
         W.trajT = -1;
       }
     }
     for (const v of W.vessels) if (v !== A && !v.destroyed) { const r = railsAdvance(v, t0, t1); if (r.event === 'impact' && !v.loaded) { v.destroyed = true; } }
+    if (SCIFI.on) for (const v of W.vessels) if (!v.destroyed) produceExotic(v, t1 - t0);
     scanAll(W.vessels, t0, t1);
     g.ut = t1;
     if (W.warp === 0) exitRailsLoaded();
@@ -503,6 +555,15 @@ function evaInput() {
   return { fwd, right, up: camUp, mz: ax('KeyW', 'KeyS'), mx: ax('KeyD', 'KeyA'), my: (k.ShiftLeft || k.ShiftRight ? 1 : 0) - (k.ControlLeft || k.ControlRight ? 1 : 0), jump, jet: !!A.evaJet };
 }
 
+// the star system the scene happens in: the floating origin for "absolute" positions (see bodies.js)
+function sceneSystem() {
+  const W = Game.world;
+  if (!W) return null;
+  if (Game.screen === 'flight' && W.active) return W.active.body.sys;
+  if (Game.screen === 'track') { const v = W.vessels.find(x => x.id === W.trackSel); return v ? v.body.sys : MAP.focus.kind === 'body' ? BODY[MAP.focus.id].sys : null; }
+  return null;
+}
+
 function flightFrame(dt) {
   const W = Game.world, g = Game.g;
   if (!W) return;
@@ -512,12 +573,22 @@ function flightFrame(dt) {
   // particles must advance by the time the world actually advanced (whole PHYS_DT steps), not the
   // frame time: Earth moves ~9 km/s, so any mismatch shows up as smoke jumping tens of metres
   W.simDt = g.ut - ut0;
+  // far from every body, fly with physics in a frame of its own (precision); the vessels loaded around come along
+  if (W.warp === 0 && A && !A.destroyed && A.loaded && !A.lock) {
+    const star = A.body, vb = voidEnter(A);
+    if (vb) {
+      for (const v of W.vessels) if (v !== A && v.loaded && v.body === star) { v.r = V.sub(v.r, vb.el.r0); v.body = vb; }
+      W.trajT = -1;
+    }
+  }
+  setOrigin(sceneSystem());   // the active vessel may have crossed into another star system this frame
   const now = performance.now();
   if (now - W.loadT > 400) { W.loadT = now; updateLoaded(); }
   // career progress
   if (A && !A.destroyed && now - W.progT > 1000) {
     W.progT = now;
     const ms = progressTick(g, A, g.ut);
+    for (const c of crewAgeTick(g, W.vessels, g.ut)) ui.toast(`Смерть от старости в полёте: ${esc(c.name)}, ${fmtYears(crewAge(c))}`, 'bad', 6000);
     for (const m of ms) ui.toast(`Достижение: ${esc(m.title)} ${isCareer(g) ? `+${fmtMoney(m.funds)} +${m.sci} науки` : ''}`, 'acc', 5000);
     Game.raceNews();
     for (const r of siteCheck(g, A, g.ut)) ui.toast(r.what === 'found' ? `Найдено место посадки ${esc(r.s.name)} (${fmtDist(r.dist)})${isCareer(g) ? ` · +${r.sci.toFixed(0)} науки` : ''}` : `Осмотрено место посадки ${esc(r.s.name)}${isCareer(g) ? ` · +${r.sci.toFixed(0)} науки` : ''}`, 'acc', 5000);
@@ -543,7 +614,7 @@ function flightFrame(dt) {
 
 function computeTraj() {
   const W = Game.world, A = W.active, t = Game.g.ut;
-  if (!A || A.landed || A.prelaunch || A.destroyed) { W.traj = null; if (A) A.nodeBurn = null; return; }
+  if (!A || A.landed || A.prelaunch || A.destroyed || A.warpOn) { W.traj = null; if (A) A.nodeBurn = null; return; }
   A.nodes = A.nodes || [];
   try { W.traj = predictTrajectory(A.body, A.r, A.v, t, { nodes: A.nodes, maxPatches: 7 }); }
   catch (e) { console.warn(e); W.traj = null; }
@@ -666,7 +737,7 @@ function flightCamera() {
 // sky brightness and sun visibility at a point near a body
 function lightAt(b, rel, t) {
   const alt = V.len(rel) - b.R;
-  const sunDir = V.norm(V.neg(bodyAbsPos(b, t)));
+  const sunDir = V.norm(V.sub(bodyAbsPos(b.host, t), bodyAbsPos(b, t)));
   const elev = V.dot(V.norm(rel), sunDir);
   const dens = b.atm && alt < b.atm.top ? Math.exp(-Math.max(0, alt) / b.atm.H) * clamp(Math.sqrt(b.atm.p0 / 101.325), 0.05, 1.5) : 0;
   const skyLight = clamp(dens * 1.5, 0, 1) * smooth(-0.15, 0.25, elev);
@@ -680,7 +751,7 @@ function renderFlight(dt) {
   if (W.map) {
     const mc = mapCameraAbs(t, A);
     camAbs = mc.abs; quat = mapCameraQuat(mc.look);
-    opts = { map: true, near: Math.max(1, MAP.dist * 1e-4) };
+    opts = { map: true, near: Math.max(1, MAP.dist * 1e-4), far: Math.max(1e14, MAP.dist * 1e4) };
   } else {
     const c = flightCamera();
     camAbs = c.camAbs; quat = c.quat;
@@ -689,6 +760,13 @@ function renderFlight(dt) {
     const L = lightAt(b, camRel, t);
     const vl = lightAt(b, A.r, t);
     opts = { focusBody: b, focusRel: camRel, skyLight: L.skyLight, sunFactor: vl.sun, near: 0.1 };
+    // science fiction: near light speed the sky crowds forward and shifts colour (velocity in the local star frame);
+    // inside a warp bubble the same look stands for the streaming stars
+    if (SCIFI.on) {
+      const vs = V.add(bodyAbsState(b, t).v, A.v), bl = V.len(vs) / C_LIGHT;
+      if (A.warpOn) opts.beta = V.scale(Q.rot(ctrlQ(A), [0, 1, 0]), Math.min(0.97, 0.55 + 0.1 * Math.log10(A.warpF || 10)));
+      else if (bl > 1e-3) opts.beta = V.scale(V.norm(vs), Math.min(bl, 0.9999));
+    }
     // shadow box around the active vessel + a catcher disc on the ground under it
     if (av) {
       const mp = massProps(A);
@@ -737,6 +815,25 @@ function renderFlight(dt) {
     }
     if (W.warp === 0 && !W.map) spawnVesselFX(v, t, W.simDt, atm, air, hf);
   }
+  // searchlights (pool of two) on the active vessel
+  let si = 0;
+  const avw = A && !W.map && W.views.get(A.id);
+  if (avw && vesselRes(A, 'ELEC') > 0.01) for (const p of A.parts) {
+    if (si >= RV.spots.length) break;
+    const d = PART[p.id];
+    if (p.dead || !d.light || !p.st.light) continue;
+    const lens = avw.parts.get(p.rid).getObjectByName('lens'), sp = RV.spots[si++];
+    lens.updateWorldMatrix(true, false);
+    sp.position.setFromMatrixPosition(lens.matrixWorld);
+    sp.target.position.copy(lens.localToWorld(new THREE.Vector3(0, 10, 0)));
+    sp.target.updateMatrixWorld();
+    sp.intensity = d.light.power; sp.distance = d.light.range; sp.angle = d.light.angle;
+    // the same beam for the terrain shader (planets do not use three.js lights)
+    SPOT_U.p.value[si - 1].copy(sp.position);
+    SPOT_U.d.value[si - 1].copy(sp.target.position).sub(sp.position).normalize();
+    SPOT_U.k.value[si - 1].set(d.light.power * 0.0035, d.light.range, Math.cos(d.light.angle), Math.cos(d.light.angle * 0.55));
+  }
+  for (; si < RV.spots.length; si++) { RV.spots[si].intensity = 0; SPOT_U.k.value[si].x = 0; }
   // historic landing sites near the camera
   if (!W.map && A) updateSites(t, A.body);
   else for (const m of (RV.siteMeshes || new Map()).values()) m.visible = false;
@@ -807,7 +904,7 @@ function spawnVesselFX(v, t, dt, atm, air, hf) {
     const back = Q.rot(v.q, V.neg(partAxis(p)));
     const thr = p.st.eng.thr;
     const solid = d.engine.prop === 'SOLID';
-    if (atm.p > 0.015 && d.engine.prop !== 'XENON' && !d.engine.air) {   // turbines leave no smoke trail
+    if (atm.p > 0.015 && !['XENON', 'FUSION', 'ANTIMAT'].includes(d.engine.prop) && !d.engine.air) {   // turbines and plasma drives leave no smoke trail
       const rate = (solid ? 5 : 2.5) * thr * Math.min(1, atm.p * 3) * dt * 60;
       for (let i = 0; i < rate; i++) {
         if (Math.random() > 0.75) continue;
@@ -905,6 +1002,27 @@ Game.toggleLegs = function () {
   for (const p of A.parts) if (!p.dead && PART[p.id].gear && PART[p.id].gear.retract) p.st.gear = A.legs;
   if (A.lock && !A.legs) { /* stays locked */ }
   A._bnd = null;
+};
+Game.toggleWarpDrive = function () {
+  const W = Game.world, A = W && W.active; if (!A) return;
+  if (A.warpOn) { A.warpOn = false; W.warp = 0; exitRailsLoaded(); W.trajT = -1; ui.toast('Варп выключен', '', 1500); return; }
+  const why = warpWhyNot(A);
+  if (why) { ui.toast('Варп невозможен: ' + why, 'bad', 2500); return; }
+  A.warpF = A.warpF || 10; A.warpOn = true; A.throttle = 0;
+  ui.toast(`Варп ${A.warpF}c — курс по носу корабля${A.sas ? '' : ' (включите SAS, чтобы держать направление)'}`, 'acc', 2500);
+};
+Game.warpFactor = function (d) {
+  const A = Game.world && Game.world.active; if (!A) return;
+  const i = WARP_FACTORS.indexOf(A.warpF || 10);
+  A.warpF = WARP_FACTORS[clamp(i + d, 0, WARP_FACTORS.length - 1)];
+};
+Game.toggleLights = function () {
+  const A = Game.world && Game.world.active; if (!A) return;
+  const ls = A.parts.filter(p => !p.dead && PART[p.id].light);
+  if (!ls.length) { ui.toast('Нет прожекторов', '', 1200); return; }
+  const on = !ls.some(p => p.st.light);
+  for (const p of ls) p.st.light = on;
+  ui.toast(on ? 'Прожекторы включены' : 'Прожекторы выключены', '', 1200);
 };
 Game.toggleSpeedMode = function () {
   const W = Game.world, A = W && W.active; if (!A) return;
@@ -1163,6 +1281,9 @@ Game.action = function (a, r, x) {
     case 'match': Game.matchVelocity(); break;
     case 'ctrl': A.ctrlPort = A.ctrlPort === +r ? null : +r; A.sasHold = null; ui.toast(A.ctrlPort != null ? 'Управление от стыковочного узла' : 'Управление от корабля', '', 1800); break;
     case 'ksc': Game.leaveFlight(); break;
+    case 'warp': Game.toggleWarpDrive(); break;
+    case 'warpup': Game.warpFactor(1); break;
+    case 'warpdn': Game.warpFactor(-1); break;
   }
   if (ui.root.querySelector('#h-act')) ui.root.querySelector('#h-act')._h = null;
   ui.hud(true);
@@ -1344,7 +1465,7 @@ function trackFrame(dt) {
     let t1 = t0 + dt * Game.warpLevels[W.warp];
     if (W.warpTo != null) { t1 = Math.min(t1, W.warpTo); if (t1 >= W.warpTo) { W.warp = 0; W.warpTo = null; } }
     t1 = alarmClamp(W, t0, t1);
-    for (const v of W.vessels) if (!v.destroyed) { if (!v.rails) enterRails(v, t0); const r = railsAdvance(v, t0, t1); if (r.event === 'impact') v.destroyed = true; }
+    for (const v of W.vessels) if (!v.destroyed) { if (!v.rails) enterRails(v, t0); const r = railsAdvance(v, t0, t1); if (r.event === 'impact') v.destroyed = true; if (SCIFI.on) produceExotic(v, t1 - t0); }
     scanAll(W.vessels, t0, t1);
     g.ut = t1;
   }
@@ -1353,7 +1474,7 @@ function trackFrame(dt) {
   if (sel && (now - (W.trajT || 0) > 300)) { W.trajT = now; W.traj = sel.landed ? null : predictTrajectory(sel.body, sel.r, sel.v, g.ut, { nodes: sel.nodes || [], maxPatches: 6 }); }
   if (!sel) W.traj = null;
   const mc = mapCameraAbs(g.ut, sel);
-  renderWorld(g.ut, mc.abs, mapCameraQuat(mc.look), { map: true, near: Math.max(1, MAP.dist * 1e-4) });
+  renderWorld(g.ut, mc.abs, mapCameraQuat(mc.look), { map: true, near: Math.max(1, MAP.dist * 1e-4), far: Math.max(1e14, MAP.dist * 1e4) });
   for (const vw of W.views.values()) vw.group.visible = false;
   FX.list.length = 0; fxUpdate(0);
   mapUpdate(g.ut, sel, W.traj, {
@@ -1361,7 +1482,12 @@ function trackFrame(dt) {
     focusVessel: () => { MAP.focus = { kind: 'vessel' }; }, selectNode: () => {},
   });
   drawFrame();
-  if (now - (W.listT || 0) > 600) { W.listT = now; ui.trackList(); Game.raceNews(); const wr = $('#t-wr'); if (wr) wr.textContent = '×' + Game.warpRate().toLocaleString('ru-RU') + ' · ' + fmtDate(g.ut); }
+  if (now - (W.listT || 0) > 600) {
+    W.listT = now;
+    for (const c of crewAgeTick(g, W.vessels, g.ut)) ui.toast(`Смерть от старости в полёте: ${esc(c.name)}, ${fmtYears(crewAge(c))}`, 'bad', 6000);
+    ui.trackList(); Game.raceNews();
+    const wr = $('#t-wr'); if (wr) wr.textContent = '×' + Game.warpRate().toLocaleString('ru-RU') + ' · ' + fmtDate(g.ut);
+  }
 }
 Game.trackSelect = function (id) {
   const W = Game.world; W.trackSel = id;
@@ -1418,6 +1544,7 @@ Game.loadSlot = function (slot) {
 Game.applyLoaded = function (g) {
   Game.leaveWorld();
   initCrew(g); g.builds = g.builds || [];      // saves (or imported files) from before the corps / build queue
+  setSciFi(g.scifi);
   Game.g = g;
   g._notify = (m) => ui.toast(m, 'acc', 5000);
   if (g.activeVesselId && g.vessels.some(s => s.id === g.activeVesselId)) {
@@ -1527,7 +1654,7 @@ function setupInput(canvas) {
       else VAB.dist = clamp(VAB.dist * f, 3, 200);
     } else if (Game.world && (Game.world.map || Game.screen === 'track')) {
       const fb = mapFocusBody(Game.world.active);
-      MAP.dist = clamp(MAP.dist * f, (fb ? fb.R : 1e3) * 1.3, 2e13);
+      MAP.dist = clamp(MAP.dist * f, (fb ? fb.R : 1e3) * 1.3, 2e17);
     } else if (Game.world) {
       Game.world.cam.dist = clamp(Game.world.cam.dist * f, 3, 30000);
     }
@@ -1544,6 +1671,8 @@ function flightKey(e) {
     case 'KeyB': if (A && isKerbalVessel(A)) Game.board(); break;
     case 'KeyF': if (A && isKerbalVessel(A)) Game.plantFlag(); break;
     case 'KeyG': Game.toggleLegs(); break;
+    case 'KeyU': Game.toggleLights(); break;
+    case 'KeyV': if (SCIFI.on) Game.toggleWarpDrive(); break;
     case 'KeyM': Game.toggleMap(); break;
     case 'KeyZ': if (A) A.throttle = 1; break;
     case 'KeyX': if (A) A.throttle = 0; break;

@@ -57,8 +57,9 @@ function _h3(x, y, z, s) {
 // base: [frequency, octaves, amplitude m]; ridge: [freq, oct, amp]; craters: [[freq, density, depthRatio], ...]
 function terrainSpec(b) {
   const R = b.R, v = b.vis;
-  if (b.gas || v.type === 'star') return null;
+  if (b.gas || v.type === 'star' || v.type === 'blackhole' || v.type === 'wormhole' || v.type === 'mega') return null;
   const s = { seed: [...b.id].reduce((a, c) => a * 31 + c.charCodeAt(0), 7) >>> 0 };
+  if (b.ter) return Object.assign(s, b.ter);
   switch (b.id) {
     case 'earth': return Object.assign(s, { kind: 'earth', base: [1.6, 9, 1], ridge: [8, 7, 3400], hills: [40, 5, 160], sea: 0, ksc: true });
     case 'moon': return Object.assign(s, { kind: 'cratered', base: [2.2, 8, 1400], maria: [1.1, 2600], craters: [[5, 0.55, 0.22], [13, 0.5, 0.2], [34, 0.45, 0.17], [90, 0.4, 0.14], [240, 0.35, 0.12], [640, 0.3, 0.1]] });
@@ -186,7 +187,7 @@ function groundHeight(b, d, minWave) {
 
 let _KSC_DIR = [1, 0, 0], _KSC_E = [0, 1, 0], _KSC_S = [0, 0, -1];
 (function initTerrain() {
-  for (const b of BODIES) {
+  for (const b of ALL_BODIES) {
     b.terrain = terrainSpec(b);
     if (!b.terrain) { b.hMax = 0; continue; }
     const T = b.terrain;

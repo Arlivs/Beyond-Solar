@@ -171,6 +171,10 @@ function initMaterials() {
     x.fillStyle = '#ffc94a'; x.beginPath(); x.arc(w * 0.51, h * 0.27, 13, 0, TAU); x.fill();
     x.fillStyle = '#f2f0ea'; x.font = 'bold 56px Arial'; x.textAlign = 'left'; x.fillText('ОРБИТА', w * 0.58, h * 0.47);
   }) });
+  MAT.coil = std({ color: 0x3a1640, emissive: 0xc040ff, emissiveIntensity: 0.6, metalness: 0.7, roughness: 0.3 });
+  MAT.coilCyan = std({ color: 0x103040, emissive: 0x40d8ff, emissiveIntensity: 0.7, metalness: 0.7, roughness: 0.3 });
+  MAT.radiator = std({ color: 0xd9dcdf, metalness: 0.3, roughness: 0.55 });
+  MAT.mirror = new THREE.MeshStandardMaterial({ color: 0xdfe4ec, metalness: 0.55, roughness: 0.3, side: THREE.DoubleSide, envMapIntensity: 1.4 });   // aluminised film: mirror sheen, still visible against black space
   // bell: steel near the throat, heat-tinted bronze/blue toward the exit (vertex colours)
   MAT.bell = std({ color: 0xffffff, vertexColors: true, metalness: 0.92, roughness: 0.32, side: THREE.DoubleSide });
 }
@@ -284,6 +288,135 @@ function buildPartMesh(def) {
         const bell = add(bellGeo(rt * 0.3, rt * (def.bell || 0.85), bellL), bm, 0, h / 2 - mountH);
         bell.name = 'bell';
       }
+      break;
+    }
+    case 'fusion': {
+      // reactor chamber with radiator fins, magnetic coils around an open pusher bell
+      const mountH = h * 0.5, bellL = h - mountH;
+      add(cyl(rt * 0.96, rt * 0.8, mountH, 48), MAT.gray, 0, h / 2 - mountH / 2);
+      add(cyl(rt * 1.0, rt * 1.0, mountH * 0.1, 48), MAT.dark, 0, h / 2 - mountH * 0.05);
+      for (let i = 0; i < 6; i++) { const a = i / 6 * TAU; const f = add(new THREE.BoxGeometry(0.03, mountH * 0.8, rt * 0.9), MAT.radiator, Math.cos(a) * rt * 1.25, h / 2 - mountH * 0.5, Math.sin(a) * rt * 1.25); f.rotation.y = -a + Math.PI / 2; }
+      for (let i = 0; i < 3; i++) add(new THREE.TorusGeometry(rt * (0.55 + i * 0.12), rt * 0.06, 10, 40), MAT.coil, 0, h / 2 - mountH - bellL * (0.15 + i * 0.3)).rotation.x = Math.PI / 2;
+      for (let i = 0; i < 4; i++) { const a = i / 4 * TAU + 0.4; add(cyl(0.035, 0.035, bellL * 0.9, 8), MAT.steel, Math.cos(a) * rt * 0.75, h / 2 - mountH - bellL * 0.45, Math.sin(a) * rt * 0.75); }
+      const bm = MAT.bell.clone(); bm.emissive = new THREE.Color(0x9a6aff); bm.emissiveIntensity = 0;
+      const bell = add(bellGeo(rt * 0.25, rt * (def.bell || 0.95), bellL * 0.55), bm, 0, h / 2 - mountH);
+      bell.name = 'bell';
+      break;
+    }
+    case 'antimatter': {
+      // shadow shield on top, long open truss, magnetic nozzle rings
+      add(cyl(rt, rt * 0.9, h * 0.08, 48), MAT.dark, 0, h / 2 - h * 0.04);
+      add(cyl(rt * 0.45, rt * 0.55, h * 0.25, 32), MAT.gray, 0, h / 2 - h * 0.2);
+      for (let i = 0; i < 6; i++) { const a = i / 6 * TAU; add(cyl(0.05, 0.05, h * 0.75, 8), MAT.steel, Math.cos(a) * rt * 0.55, -h * 0.07, Math.sin(a) * rt * 0.55); }
+      for (let i = 0; i < 5; i++) add(new THREE.TorusGeometry(rt * (0.5 + i * 0.07), rt * 0.05, 10, 48), MAT.coilCyan, 0, -h * 0.05 - i * h * 0.09).rotation.x = Math.PI / 2;
+      const bm = MAT.bell.clone(); bm.emissive = new THREE.Color(0x40d8ff); bm.emissiveIntensity = 0;
+      const bell = add(bellGeo(rt * 0.2, rt * 0.6, h * 0.12), bm, 0, -h * 0.38); bell.name = 'bell';
+      break;
+    }
+    case 'photon': {
+      // a parabolic mirror around the annihilation point: the light itself is the exhaust
+      add(cyl(rt * 0.45, rt * 0.55, h * 0.3, 32), MAT.gray, 0, h / 2 - h * 0.15);
+      for (let i = 0; i < 6; i++) { const a = i / 6 * TAU; add(cyl(0.06, 0.06, h * 0.55, 8), MAT.steel, Math.cos(a) * rt * 0.4, h * 0.05, Math.sin(a) * rt * 0.4); }
+      const pts = []; for (let i = 0; i <= 24; i++) { const x = rt * 0.08 + rt * 0.95 * i / 24; pts.push(new THREE.Vector2(x, -(x * x) / (rt * 2.2))); }
+      const mir = add(new THREE.LatheGeometry(pts, 64), MAT.mirror, 0, -h * 0.05); mir.scale.y = -1;
+      const core = add(new THREE.SphereGeometry(rt * 0.12, 24, 16), new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xc8e6ff, emissiveIntensity: 0, roughness: 0.2 }), 0, -h * 0.22);
+      core.name = 'bell';   // glows with the engine's heat
+      break;
+    }
+    case 'warpCore': {
+      // the Alcubierre rings around a dense core; they light up while the bubble is up
+      add(cyl(rt * 0.5, rt * 0.5, h * 0.9, 32), MAT.dark);
+      add(cyl(rt * 0.55, rt * 0.55, h * 0.12, 32), MAT.gold, 0, h * 0.3); add(cyl(rt * 0.55, rt * 0.55, h * 0.12, 32), MAT.gold, 0, -h * 0.3);
+      const ringMat = new THREE.MeshStandardMaterial({ color: 0x223344, emissive: 0x4fd0ff, emissiveIntensity: 0.25, metalness: 0.8, roughness: 0.25 });
+      for (const y of [h * 0.22, -h * 0.22]) { const r = add(new THREE.TorusGeometry(rt * 1.25, rt * 0.08, 12, 64), ringMat, 0, y); r.rotation.x = Math.PI / 2; }
+      for (let i = 0; i < 4; i++) { const a = i / 4 * TAU + Math.PI / 4; const s = add(new THREE.BoxGeometry(rt * 0.8, 0.12, 0.12), MAT.steel, Math.cos(a) * rt * 0.85, 0, Math.sin(a) * rt * 0.85); s.rotation.y = -a; }
+      g.userData.warpRings = ringMat;
+      break;
+    }
+    case 'exoticTank': {
+      add(cyl(rt * 0.96, rb * 0.96, h * 0.94, 48), MAT.dark);
+      const glow = new THREE.MeshStandardMaterial({ color: 0x220a33, emissive: 0xb050ff, emissiveIntensity: 1.2, roughness: 0.3 });
+      for (let i = 0; i < 8; i++) { const a = i / 8 * TAU; const w = add(new THREE.BoxGeometry(0.05, h * 0.7, rt * 0.22), glow, Math.cos(a) * rt * 0.97, 0, Math.sin(a) * rt * 0.97); w.rotation.y = -a; }
+      add(cyl(rt, rt, h * 0.03, 48), MAT.gray, 0, h * 0.485); add(cyl(rb, rb, h * 0.03, 48), MAT.gray, 0, -h * 0.485);
+      break;
+    }
+    case 'shipyard': {
+      // a drydock: an open frame of trusses round a core, with a ring of floodlit docking arms
+      add(cyl(rt * 0.45, rt * 0.45, h, 24), MAT.gray);
+      for (const y of [-0.42, 0, 0.42]) { const r = add(new THREE.TorusGeometry(rt * 1.1, rt * 0.05, 8, 48), MAT.steel, 0, y * h); r.rotation.x = Math.PI / 2; }
+      for (let i = 0; i < 8; i++) { const a = i / 8 * TAU; add(new THREE.BoxGeometry(0.12, h * 0.95, 0.12), MAT.steel, Math.cos(a) * rt * 1.1, 0, Math.sin(a) * rt * 1.1); }
+      for (let i = 0; i < 4; i++) { const a = i / 4 * TAU; const arm = add(new THREE.BoxGeometry(rt * 1.4, 0.2, 0.2), MAT.stripe, Math.cos(a) * rt * 0.8, h * 0.42, Math.sin(a) * rt * 0.8); arm.rotation.y = -a; }
+      add(cyl(rt, rt, h * 0.04, 48), MAT.dark, 0, h * 0.49); add(cyl(rb, rb, h * 0.04, 48), MAT.dark, 0, -h * 0.49);
+      break;
+    }
+    case 'synth': {
+      add(cyl(rt * 0.95, rb * 0.95, h * 0.9, 48), MAT.gray);
+      const glow = new THREE.MeshStandardMaterial({ color: 0x220a33, emissive: 0xb050ff, emissiveIntensity: 1.6, roughness: 0.3 });
+      for (let i = 0; i < 5; i++) add(new THREE.TorusGeometry(rt * 1.0, rt * 0.06, 10, 48), glow, 0, (-0.36 + i * 0.18) * h).rotation.x = Math.PI / 2;
+      for (let i = 0; i < 4; i++) { const a = i / 4 * TAU + Math.PI / 4; const f = add(new THREE.BoxGeometry(0.03, h * 0.7, rt * 1.6), MAT.radiator, Math.cos(a) * rt * 1.6, 0, Math.sin(a) * rt * 1.6); f.rotation.y = -a + Math.PI / 2; }
+      break;
+    }
+    case 'cryo': {
+      // insulated hull with four frosted pod windows glowing cold blue
+      add(cyl(rt, rb, h * 0.92, 64), texMat('white', 4, 1));
+      add(cyl(rt * 1.01, rt * 1.01, h * 0.06, 64), MAT.dark, 0, h * 0.44); add(cyl(rb * 1.01, rb * 1.01, h * 0.06, 64), MAT.dark, 0, -h * 0.44);
+      const frost = new THREE.MeshStandardMaterial({ color: 0x9fd8ff, emissive: 0x58b8ff, emissiveIntensity: 0.9, roughness: 0.2, metalness: 0.1 });
+      for (let i = 0; i < 4; i++) {
+        const a = i / 4 * TAU + Math.PI / 4;
+        const w = add(new THREE.CapsuleGeometry(rt * 0.13, h * 0.42, 6, 16), frost, Math.cos(a) * rt * 0.97, 0, Math.sin(a) * rt * 0.97);
+        w.scale.set(1, 1, 0.35); w.rotation.y = -a;
+      }
+      add(cyl(rt * 1.004, rt * 1.004, h * 0.08, 64), MAT.blue, 0, h * 0.3);
+      break;
+    }
+    case 'cryoTank': {
+      add(cyl(rt * 0.98, rb * 0.98, h * 0.9, 64), texMat('white', 4, 2));
+      for (const y of [-0.3, 0, 0.3]) add(cyl(rt * 1.01, rt * 1.01, h * 0.05, 64), MAT.blue, 0, y * h);
+      add(cyl(rt * 1.004, rt * 1.004, h * 0.12, 64), MAT.gold, 0, h * 0.15);
+      add(cyl(rt * 1.004, rt * 1.004, h * 0.03, 64), MAT.dark, 0, h * 0.485);
+      add(cyl(rb * 1.004, rb * 1.004, h * 0.03, 64), MAT.dark, 0, -h * 0.485);
+      break;
+    }
+    case 'amTrap': {
+      add(cyl(rt * 0.9, rb * 0.9, h * 0.94, 48), MAT.dark);
+      for (let i = 0; i < 4; i++) add(new THREE.TorusGeometry(rt * 0.93, rt * 0.07, 10, 48), MAT.coil, 0, (-0.33 + i * 0.22) * h).rotation.x = Math.PI / 2;
+      add(cyl(rt, rt, h * 0.03, 48), MAT.gray, 0, h * 0.485); add(cyl(rb, rb, h * 0.03, 48), MAT.gray, 0, -h * 0.485);
+      break;
+    }
+    case 'rtg': {
+      const x = def.depth * 0.5;
+      add(new THREE.BoxGeometry(0.06, def.h * 0.4, def.w * 0.5), MAT.dark, 0.03, 0, 0);
+      add(cyl(def.depth * 0.18, def.depth * 0.18, def.h, 16), MAT.dark, x, 0, 0);
+      for (let i = 0; i < 8; i++) { const a = i / 8 * TAU; const f = add(new THREE.BoxGeometry(0.012, def.h * 0.9, def.depth * 0.3), MAT.gray, x + Math.cos(a) * def.depth * 0.3, 0, Math.sin(a) * def.depth * 0.3); f.rotation.y = -a; }
+      break;
+    }
+    case 'reactor': {
+      add(cyl(rt, rb, h * 0.92, 48), MAT.gray);
+      add(cyl(rt * 1.01, rt * 1.01, h * 0.08, 48), MAT.stripe, 0, h * 0.2);
+      add(cyl(rt * 1.004, rt * 1.004, h * 0.04, 48), MAT.dark, 0, h * 0.48); add(cyl(rb * 1.004, rb * 1.004, h * 0.04, 48), MAT.dark, 0, -h * 0.48);
+      for (let i = 0; i < 4; i++) { const a = i / 4 * TAU + Math.PI / 4; const f = add(new THREE.BoxGeometry(0.03, h * 0.8, rt * 2.2), MAT.radiator, Math.cos(a) * rt * 2.1, -h * 0.02, Math.sin(a) * rt * 2.1); f.rotation.y = -a + Math.PI / 2; }
+      break;
+    }
+    case 'sail': {
+      add(cyl(rt, rb, h * 0.9, 48), MAT.gold);
+      add(cyl(rt * 1.01, rt * 1.01, h * 0.12, 48), MAT.dark, 0, h * 0.38);
+      // deployed sail: booms on the diagonals and a mirror membrane, scaled open by the view
+      const sg = new THREE.Group(); sg.name = 'sail'; sg.position.y = h / 2;
+      const S = def.sail.span;
+      const mem = new THREE.Mesh(new THREE.PlaneGeometry(S, S, 1, 1), MAT.mirror); mem.rotation.x = -Math.PI / 2; sg.add(mem);
+      for (let i = 0; i < 4; i++) { const b = new THREE.Mesh(cyl(0.06, 0.06, S * 0.7071, 6), MAT.steel); b.rotation.z = Math.PI / 2; b.position.x = S * 0.3535; const hb = new THREE.Group(); hb.rotation.y = Math.PI / 4 + i * Math.PI / 2; hb.position.y = 0.05; hb.add(b); sg.add(hb); }
+      sg.scale.setScalar(0.001); sg.visible = false;
+      g.add(sg);
+      break;
+    }
+    case 'light': {
+      // the lamp head looks outward and tilted down along the hull, like a landing light
+      const tilt = (def.light.tilt || 0) * DEG, ax = [Math.cos(tilt), -Math.sin(tilt)];
+      add(new THREE.BoxGeometry(def.depth * 0.5, def.h * 0.6, def.w * 0.6), MAT.dark, def.depth * 0.25, 0, 0);
+      const hd = add(cyl(def.w * 0.42, def.w * 0.3, def.depth * 0.5, 20), MAT.gray, def.depth * 0.5 + ax[0] * def.depth * 0.1, ax[1] * def.depth * 0.1, 0); hd.rotation.z = -Math.PI / 2 - tilt;
+      const lens = add(cyl(def.w * 0.38, def.w * 0.38, 0.02, 20), new THREE.MeshStandardMaterial({ color: 0x333333, emissive: 0xfff2d8, emissiveIntensity: 0, roughness: 0.1 }),
+        def.depth * 0.5 + ax[0] * def.depth * 0.36, ax[1] * def.depth * 0.36, 0);
+      lens.rotation.z = -Math.PI / 2 - tilt; lens.name = 'lens';
       break;
     }
     case 'srb': {
@@ -546,6 +679,9 @@ function plumeMaterial(kind) {
     solid: [[1.0, 0.55, 0.2], [1.0, 0.95, 0.8]],
     ion: [[0.25, 0.45, 1.0], [0.75, 0.85, 1.0]],
     nuclear: [[1.0, 0.55, 0.6], [1.0, 0.9, 0.95]],
+    fusion: [[0.55, 0.42, 1.0], [0.92, 0.88, 1.0]],
+    antimatter: [[0.3, 0.85, 1.0], [0.95, 1.0, 1.0]],
+    photon: [[0.85, 0.92, 1.0], [1.0, 1.0, 1.0]],
     plasma: [[1.0, 0.38, 0.15], [1.0, 0.8, 0.6]],
     jet: [[0.85, 0.42, 0.22], [1.0, 0.75, 0.5]],
   }[kind];
@@ -588,7 +724,8 @@ class VesselView {
       this.group.add(m);
       this.parts.set(p.rid, m);
       if (d.engine) {
-        const kind = d.engine.air ? 'jet' : d.engine.prop === 'SOLID' ? 'solid' : d.engine.prop === 'XENON' ? 'ion' : d.shape === 'nuclear' ? 'nuclear' : 'liquid';
+        const kind = d.engine.air ? 'jet' : d.engine.prop === 'SOLID' ? 'solid' : d.engine.prop === 'XENON' ? 'ion' : d.engine.prop === 'FUSION' ? 'fusion' :
+          d.shape === 'photon' ? 'photon' : d.engine.prop === 'ANTIMAT' ? 'antimatter' : d.shape === 'nuclear' ? 'nuclear' : 'liquid';
         const rr = (d.dBot / 2) * (d.engine.prop === 'SOLID' ? 0.62 : (d.bell || 0.85)) * 0.95;
         const outer = new THREE.Mesh(plumeGeo(), plumeMaterial(kind));
         const core = new THREE.Mesh(plumeGeo(), plumeMaterial(kind));
@@ -667,6 +804,13 @@ class VesselView {
         for (let i = 0; i < pa.count; i++) { const x = cl.userData.x0[i] + 0.55; pa.setZ(i, wind * x * 0.12 * Math.sin(x * 6 - t * 4.5 + pa.getY(i) * 2)); }
         pa.needsUpdate = true;
       }
+      if (PART[p.id].sail) {
+        const sg = m.getObjectByName('sail');
+        p._sailA = Math.min(1, (p._sailA || 0) + (p.st.sail ? (dt || 0.016) * 0.25 : -1));
+        sg.visible = p._sailA > 0.002; sg.scale.setScalar(Math.max(0.001, p._sailA * p._sailA));
+      }
+      if (PART[p.id].light) m.getObjectByName('lens').material.emissiveIntensity = p.st.light && vesselRes(v, 'ELEC') > 0.01 ? 4 : 0;
+      if (PART[p.id].warp) m.userData.warpRings.emissiveIntensity = v.warpOn ? 3.5 + Math.sin(t * 6) * 0.8 : 0.25;
       if (p.st.legs != null) {
         const leg = m.getObjectByName('leg');
         if (leg) { p._legA = lerp(p._legA || 0, p.st.legs ? 1 : 0, 0.08); leg.rotation.z = -lerp(0.05, 0.55, p._legA); }
@@ -685,6 +829,14 @@ class VesselView {
         }
       }
     }
+    // the warp bubble: a thin shell of bent light around the ship
+    if (v.warpOn && !this.bubble) {
+      this.bubble = new THREE.Mesh(new THREE.SphereGeometry(1, 48, 24), new THREE.ShaderMaterial({ uniforms: { uT: { value: 0 } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+        vertexShader: 'varying vec3 vN, vV; void main(){ vec4 wp = modelViewMatrix * vec4(position, 1.0); vN = normalize(normalMatrix * normal); vV = normalize(-wp.xyz); gl_Position = projectionMatrix * wp; }',
+        fragmentShader: 'uniform float uT; varying vec3 vN, vV; void main(){ float f = pow(1.0 - abs(dot(vN, vV)), 3.0); float w = 0.6 + 0.4 * sin(uT * 3.0 + vN.y * 12.0); gl_FragColor = vec4(vec3(0.35, 0.75, 1.0) * f * w * 1.4, 1.0); }' }));
+      this.bubble.renderOrder = 9; this.bubble.frustumCulled = false; this.group.add(this.bubble);
+    }
+    if (this.bubble) { this.bubble.visible = !!v.warpOn; this.bubble.scale.setScalar(this.bounds.size * 1.4 + 4); this.bubble.material.uniforms.uT.value = t; }
     const pAtm = clamp(atmP || 0, 0, 1);
     for (const pl of this.plumes) {
       const p = pl.p, e = p.st.eng;
@@ -696,13 +848,14 @@ class VesselView {
       pl.outer.visible = pl.core.visible = pl.sprite.visible = on && !p.dead;
       if (!on) continue;
       const vac = 1 - pAtm;
-      const base = pl.kind === 'ion' ? 4 : pl.kind === 'solid' ? 11 : pl.kind === 'jet' ? 3 : 7;
+      const beam = pl.kind === 'fusion' || pl.kind === 'antimatter' || pl.kind === 'photon';   // magnetic nozzles / a light beam: long, collimated
+      const base = pl.kind === 'ion' ? 4 : pl.kind === 'solid' ? 11 : pl.kind === 'jet' ? 3 : pl.kind === 'fusion' ? 16 : pl.kind === 'antimatter' ? 22 : pl.kind === 'photon' ? 40 : 7;
       // short and dense at sea level, long and faint in vacuum
       const len = base * (0.45 + 0.55 * thr) * (1 + vac * 1.6) * (pl.rr * 1.4 + 0.35);
       for (const [mesh, k, lenK, iK] of [[pl.outer, 1, 1, 0.45], [pl.core, 0.5, 0.42, 0.7]]) {
         const u = mesh.material.uniforms;
         u.uT.value = t; u.uThr.value = thr; u.uP.value = pAtm * (pl.kind === 'ion' ? 0 : 1);
-        u.uExp.value = (pl.kind === 'ion' ? 1.3 : lerp(0.7, 3.4, vac)) * (k === 1 ? 1 : 0.8);
+        u.uExp.value = (pl.kind === 'ion' ? 1.3 : beam ? 0.55 : lerp(0.7, 3.4, vac)) * (k === 1 ? 1 : 0.8);
         u.uLen.value = len * lenK; u.uR0.value = pl.rr * k;
         u.uI.value = (pl.kind === 'ion' ? 0.6 : pl.kind === 'jet' ? 0.3 : 1) * iK * lerp(0.55, 1.0, pAtm);
       }

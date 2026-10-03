@@ -112,10 +112,11 @@ function autoStage(design) {
   const nSec = sec + 1;
   const engines = Array.from({ length: nSec }, () => new Set());
   const radDecs = Array.from({ length: nSec }, () => new Set());
-  const chutes = new Set();
+  const chutes = new Set(), sails = new Set();
   for (const it of L) {
     const s = secOfStack[it.si];
     if (it.def.chute) chutes.add(it.uid);
+    else if (it.def.sail) sails.add(it.uid);
     else if (it.def.engine) engines[s].add(it.uid);
     else if (it.def.decoupler === 'radial') radDecs[s].add(it.uid);
   }
@@ -127,6 +128,7 @@ function autoStage(design) {
     if (st.length) stages.push(st);
     if (radDecs[s].size) stages.push([...radDecs[s]]);
   }
+  if (sails.size) stages.push([...sails]);
   if (chutes.size) stages.push([...chutes]);
   design.stages = stages;
   design.customStages = false;
@@ -160,6 +162,8 @@ function buildVessel(design, name) {
     if (d.legs) p.st.legs = false;
     if (d.gear && d.gear.retract) p.st.gear = true;
     if (d.solar) p.st.solar = true;
+    if (d.sail) p.st.sail = false;
+    if (d.light) p.st.light = false;
     return p;
   });
   parts.forEach((p, i) => { if (PART[p.id].dock) p.portDir = dockFacing(L, i); });
@@ -326,7 +330,7 @@ function simulateStages(v, pAtm, gRef) {
     if (pr === 'SOLID') return [rid];
     if (pr === 'XENON') return [...alive].filter(r => (res.get(r).XENON || 0) > 1e-9);
     const dm = v.domain[rid];
-    return [...alive].filter(r => v.domain[r] === dm && (res.get(r).LFO || 0) > 1e-9);
+    return [...alive].filter(r => v.domain[r] === dm && (res.get(r)[pr] || 0) > 1e-9);
   };
   const out = [];
   // engines already burning form a pseudo-stage (index stageIdx-1) that is simulated first
@@ -360,7 +364,7 @@ function simulateStages(v, pAtm, gRef) {
       let F = 0, mdot = 0;
       for (const r of act) {
         const e = PART[parts[r].id].engine, md = engineMdot(e), src = fuelOf(r);
-        let tot = 0; const key = PART[parts[r].id].engine.prop === 'SOLID' ? 'SOLID' : (PART[parts[r].id].engine.prop === 'XENON' ? 'XENON' : 'LFO');
+        let tot = 0; const key = e.prop;
         for (const x of src) tot += res.get(x)[key];
         for (const x of src) draw.set(x + ':' + key, (draw.get(x + ':' + key) || 0) + md * res.get(x)[key] / tot);
         F += md * engineIsp(e, pAtm) * G0; mdot += md;
@@ -457,5 +461,14 @@ function stockDesigns() {
     makeDesign('Стыковщик', ['dock_s', { id: 'pod_k1', r: [{ sym: 4, y: 0.15, part: 'rcs' }, { sym: 2, y: -0.25, ang: 45, part: 'chute_r' }] }, 'shield_s1', 'dec_s1',
       'mono_s1', 'tank_t1l', 'eng_terrier', 'dec_s1', { id: 'tank_t1xl', r: [{ sym: 2, y: 0.1, mount: 'dec_r', col: ['nose_s1', 'srb_hammer'], anchor: 1 }] },
       { id: 'tank_t1xl', r: [{ sym: 4, y: -0.42, part: 'fin' }] }, 'eng_swivel']),
-  ];
+    // interstellar: a chemical first stage lifts it out of the thick air, then the fusion drive takes over
+    makeDesign('Дедал', [{ id: 'pod_k3', r: [{ sym: 4, y: -0.1, ang: 45, part: 'rtg' }, { sym: 1, y: 0.25, ang: 0, part: 'antenna' }, { sym: 2, y: -0.3, ang: 0, part: 'light' }] },
+      'cryo', 'reactor', 'tank_he3', 'eng_fusion', 'dec_s2', { id: 'tank_t2l', r: [{ sym: 4, y: -0.42, part: 'fin_big' }] }, 'eng_skipper']),
+  ].concat(SCIFI.on ? [
+    // science fiction: a warp ship with a photon drive, and a shipyard base (lifted by the fusion stage)
+    makeDesign('Пилигрим', [{ id: 'pod_k3', r: [{ sym: 2, y: -0.3, ang: 0, part: 'light' }, { sym: 1, y: 0.25, ang: 90, part: 'antenna' }] }, 'cryo', 'reactor', 'reactor',
+      'tank_exotic_l', 'warp_core', 'tank_am', 'eng_photon', 'dec_s3', { id: 'tank_t3l', r: [{ sym: 4, y: -0.42, part: 'fin_big' }] }, 'eng_mammoth']),
+    makeDesign('Звёздный док', [{ id: 'pod_k3', r: [{ sym: 4, y: 0, ang: 45, part: 'rtg' }] }, 'shipyard', 'reactor', 'reactor', 'reactor', 'reactor', 'exotic_synth', 'tank_exotic',
+      'tank_he3_l', 'eng_fusion', 'dec_s3', { id: 'tank_t3l', r: [{ sym: 4, y: -0.42, part: 'fin_big' }] }, 'eng_mammoth']),
+  ] : []);
 }

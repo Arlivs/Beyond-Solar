@@ -74,8 +74,10 @@ const ui = {
     const m = this.modal(mode === 'career' ? 'Новая карьера' : 'Новая песочница', `<div class="dim" style="margin-bottom:8px">Планеты движутся по настоящим орбитам: в выбранный день Луна, Марс и остальные стоят там же, где на настоящем небе, и окна перелётов совпадают с реальными.</div>
       <div class="vitem" data-d="j2000"><b>1 января 2000</b><span>классическая эпоха J2000</span></div>
       <div class="vitem" data-d="today"><b>Сегодня, ${fmtDay(dateToUt(today.getTime()))}</b><span>настоящее небо над вами</span></div>
-      <div class="vitem"><div class="row"><b class="grow">Своя дата</b><input type="date" id="ng-date" value="${iso}" min="1950-01-01" max="2100-12-31"><button id="ng-go">Начать</button></div></div>`, [{ label: 'Отмена' }]);
-    const go = (ms) => { this.closeModal(); Game.newGame(mode, { start: ms == null ? undefined : dateToUt(ms) }); };
+      <div class="vitem"><div class="row"><b class="grow">Своя дата</b><input type="date" id="ng-date" value="${iso}" min="1950-01-01" max="2100-12-31"><button id="ng-go">Начать</button></div></div>
+      <label class="vitem scifi-opt" style="display:flex;gap:10px;align-items:flex-start;cursor:pointer"><input type="checkbox" id="ng-scifi" style="margin-top:3px">
+        <span><b>Режим фантастики</b><br><span class="dim">Варп-двигатель, червоточины, теория относительности у скорости света, чёрные дыры, галактики и квазары, мегаструктуры и космические базы. Реалистичная игра остаётся отдельно.</span></span></label>`, [{ label: 'Отмена' }]);
+    const go = (ms) => { const scifi = m.querySelector('#ng-scifi').checked; this.closeModal(); Game.newGame(mode, { start: ms == null ? undefined : dateToUt(ms), scifi }); };
     m.querySelector('.body').onclick = (e) => {
       const it = e.target.closest('[data-d]'); if (it) go(it.dataset.d === 'today' ? Date.now() : null);
       if (e.target.id === 'ng-go') { const v = m.querySelector('#ng-date').value; if (v) go(Date.parse(v + 'T09:00:00Z')); }
@@ -155,7 +157,16 @@ const ui = {
     $('#v-ksc').onclick = () => Game.toKSC();
     $('#v-crew').onclick = () => this.crewDlg();
     $('#v-share').onclick = () => this.shareDlg(VAB.design);
-    $('#v-site').onclick = (e) => { VAB.design.site = VAB.design.site === 'runway' ? 'pad' : 'runway'; e.target.textContent = 'Старт: ' + (VAB.design.site === 'runway' ? 'полоса' : 'стол'); this.toast(VAB.design.site === 'runway' ? 'Старт с полосы: нос на восток, брюхом вниз — шасси крепите вниз (−90°)' : 'Старт со стартового стола', '', 3000); };
+    // launch site: pad, runway, and in science fiction any shipyard in flight (design.site 'yard:<vessel id>')
+    const siteName = (st) => st === 'runway' ? 'полоса' : st && st.startsWith('yard:') ? 'верфь «' + ((shipyards(Game.g).find(y => 'yard:' + y.id === st) || { name: '?' }).name) + '»' : 'стол';
+    if (VAB.design.site && VAB.design.site.startsWith('yard:') && !shipyards(Game.g).some(y => 'yard:' + y.id === VAB.design.site)) VAB.design.site = 'pad';
+    $('#v-site').textContent = 'Старт: ' + siteName(VAB.design.site);
+    $('#v-site').onclick = (e) => {
+      const opts = ['pad', 'runway', ...shipyards(Game.g).map(y => 'yard:' + y.id)], cur = opts.indexOf(VAB.design.site || 'pad');
+      VAB.design.site = opts[(cur + 1) % opts.length];
+      e.target.textContent = 'Старт: ' + siteName(VAB.design.site);
+      this.toast(VAB.design.site === 'runway' ? 'Старт с полосы: нос на восток, брюхом вниз — шасси крепите вниз (−90°)' : VAB.design.site.startsWith('yard:') ? 'Старт с верфи: корабль появится рядом с ней' : 'Старт со стартового стола', '', 3000);
+    };
     $('#v-launch').onclick = () => Game.launch(JSON.parse(JSON.stringify(VAB.design)));
     $('#v-undo').onclick = () => vabUndo(); $('#v-redo').onclick = () => vabRedo();
     $('#v-del').onclick = () => vabDiscardHeld();
@@ -173,7 +184,7 @@ const ui = {
     tabs.innerHTML = CATS.map(([id, n]) => `<button data-c="${id}" class="${VAB.cat === id ? 'on' : ''}">${n}</button>`).join('');
     tabs.onclick = (e) => { const c = e.target.dataset.c; if (c) { VAB.cat = c; this.vabPalette(); } };
     const g = Game.g;
-    const list = PARTS.filter(p => p.cat === VAB.cat && !p.hidden && partUnlocked(g, p.id));
+    const list = PARTS.filter(p => p.cat === VAB.cat && !p.hidden && (!p.scifi || SCIFI.on) && partUnlocked(g, p.id));
     const heldId = VAB.held && VAB.held.kind === 'new' ? VAB.held.id : null;
     $('#vab .pal').classList.toggle('holding', !!VAB.held);
     $('#v-plist').innerHTML = list.map(p => `<div class="pcard ${heldId === p.id ? 'held' : ''}" data-id="${p.id}"><b>${esc(p.name)}</b><span>${p.wetMass.toFixed(p.wetMass < 1 ? 3 : 2)} т · ${fmtMoney(p.fullCost)}</span>${p.engine ? `<span><br>${p.engine.thrust} кН · ${p.engine.ispVac} с</span>` : p.res.LFO ? `<span><br>топливо ${p.res.LFO} т</span>` : ''}</div>`).join('') ||
@@ -207,7 +218,7 @@ const ui = {
     const st = vabStats();
     const sb = $('#v-stats');
     if (!st) { sb.innerHTML = '<div class="ttl">Характеристики</div><span class="dim">Начните с командного модуля (капсула или зонд).</span>'; $('#v-stg').innerHTML = ''; return; }
-    const bodies = BODIES.filter(b => !b.gas && b.vis.type !== 'star' && b.R > 5e4);
+    const bodies = BODIES.filter(b => !b.gas && b.vis.type !== 'star' && !b.bh && !b.wh && !b.mega && b.R > 5e4);
     let tv = 0, ts = 0;
     const rows = st.stages.map(x => { tv += x.dvVac; ts += x.dvSL; return `<tr><td>${x.n}</td><td>${x.dvVac.toFixed(0)}</td><td>${x.dvSL.toFixed(0)}</td><td class="${x.twr > 0 && x.twr < 1 ? 'bad' : ''}">${x.twr ? x.twr.toFixed(2) : '—'}</td><td>${x.time ? x.time.toFixed(0) + 'с' : ''}</td></tr>`; }).reverse().join('');
     sb.innerHTML = `<div class="ttl">Характеристики</div>
@@ -349,7 +360,7 @@ const ui = {
     const b = v.body, alt = V.len(v.r) - b.R;
     // fast fields every frame
     const radar = v.radarAlt != null && !b.gas ? v.radarAlt : null;
-    $('#h-alt').textContent = fmtDist(alt);
+    $('#h-alt').textContent = b.void ? fmtDist(voidStarDist(v)) : fmtDist(alt);
     const ra = $('#h-radar'); if (ra) ra.textContent = radar != null && radar < 20000 ? 'над поверхностью ' + fmtDist(Math.max(0, radar)) : '';
     const mode = navSpeedMode(v);
     const sv = navVelocity(v);
@@ -407,10 +418,17 @@ const ui = {
       const el = elFromState(v.r, v.v, b.mu, t);
       const kv = (k, x) => `<div class="kv"><span>${k}</span><b>${x}</b></div>`;
       const tAp = el.e < 1 ? elTimeAtNu(el, Math.PI, t) - t : NaN, tPe = elTimeAtNu(el, 0, t);
-      oh += kv('Тело', b.name) + kv('Апоцентр', el.e < 1 ? fmtDist(el.ra - b.R) : '∞') + (el.e < 1 ? kv('  до Ап', fmtDur(tAp, true)) : '') +
+      if (el.lin) oh += kv('Пространство', 'свободный полёт') + kv('До звезды', fmtDist(V.len(V.add(v.r, bodyRelState(b, t).r)))) + kv('Звезда', esc(b.parent.name));
+      else oh += kv('Тело', b.name) + kv('Апоцентр', el.e < 1 ? fmtDist(el.ra - b.R) : '∞') + (el.e < 1 ? kv('  до Ап', fmtDur(tAp, true)) : '') +
         kv('Перицентр', fmtDist(el.rp - b.R)) + (tPe != null ? kv('  до Пе', fmtDur(tPe - t, true)) : '') +
-        kv('Наклонение', (el.inc / DEG).toFixed(2) + '°') + kv('Эксцентриситет', el.e.toFixed(4)) + (el.e < 1 ? kv('Период', fmtDur(el.T, true)) : '') +
-        kv('Перегрузка', (v.accel || 0).toFixed(2) + ' g');
+        kv('Наклонение', (el.inc / DEG).toFixed(2) + '°') + kv('Эксцентриситет', el.e < 1e4 ? el.e.toFixed(4) : el.e.toExponential(2)) + (el.e < 1 ? kv('Период', fmtDur(el.T, true)) : '');
+      oh += kv('Перегрузка', (v.accel || 0).toFixed(2) + ' g');
+      if (SCIFI.on) {
+        const gm = lorentz(V.add(bodyAbsState(b, t).v, v.v)), gw = b.bh ? Math.sqrt(Math.max(1 - b.R / V.len(v.r), 1e-6)) : 1;
+        if (gm > 1.0005) oh += kv('Лоренц-фактор γ', gm.toFixed(3));
+        if (gm > 1.0005 || gw < 0.9995) oh += kv('Бортовое время', '×' + (gw / gm).toFixed(gw / gm < 0.01 ? 5 : 3));
+        if (b.bh) oh += kv('Горизонт событий', fmtDist(alt)) + kv('Прилив на корпусе', (2 * b.mu * vesselBounds(v).size / Math.pow(V.len(v.r), 3)).toFixed(1) + ' м/с²');
+      }
       if (v.dynP > 1) oh += kv('Скор. напор', (v.dynP / 1000).toFixed(1) + ' кПа');
       if (b.atm && alt < b.atm.top) {
         const ua = Q.invRot(v.q, V.sub(v.v, V.cross(bodyOmega(b), v.r))), sp = V.len(ua);
@@ -434,16 +452,19 @@ const ui = {
     // resources
     let rh = '<div class="ttl">Ресурсы</div>';
     const stageRes = Game.stageResources(v);
-    for (const k of ['LFO', 'SOLID', 'MONO', 'ELEC', 'XENON', 'ABLATOR']) {
+    for (const k of Object.keys(RES_NAMES)) {
       const mx = vesselResMax(v, k); if (mx <= 0) continue;
       const cur = vesselRes(v, k);
       rh += `<div class="kv"><span>${RES_NAMES[k]}</span><b>${k === 'ELEC' ? cur.toFixed(0) : cur.toFixed(2)} / ${k === 'ELEC' ? mx.toFixed(0) : mx.toFixed(2)}</b></div><div class="bar"><i style="width:${(cur / mx * 100).toFixed(1)}%"></i></div>`;
     }
     const ekp = isKerbalVessel(v) ? kerbalPart(v) : null;
     if (ekp) rh += `<div class="kv"><span>Ранец ${v.evaJet ? '(вкл)' : '(выкл)'}</span><b>${(ekp.st.evaFuel || 0).toFixed(2)} / ${EVA.fuel}</b></div><div class="bar"><i style="width:${((ekp.st.evaFuel || 0) / EVA.fuel * 100).toFixed(0)}%"></i></div><div class="kv"><span>Δv ранца</span><b>${((ekp.st.evaFuel || 0) * EVA.dvPerUnit).toFixed(0)} м/с</b></div>`;
+    if (sailDeployed(v)) rh += `<div class="kv"><span>Тяга паруса</span><b>${((v.sailNow || 0) * 1000).toFixed(1)} мН</b></div>`;
     if (stageRes) rh += `<div class="kv"><span>Топливо ступени</span><b>${stageRes.cur.toFixed(2)} / ${stageRes.max.toFixed(2)} т</b></div>`;
     const sim = Game.flightDV(v);
-    if (sim) rh += `<div class="kv"><span>Δv ступени / всего</span><b>${sim.cur.toFixed(0)} / ${sim.total.toFixed(0)} м/с</b></div><div class="kv"><span>TWR (${esc(v.body.name)})</span><b>${sim.twr.toFixed(2)}</b></div>`;
+    // science fiction: a stage's Δv is a rapidity; from rest it reaches c·tanh(Δv / c)
+    const dvTxt = (x) => SCIFI.on && x > 0.01 * C_LIGHT ? (Math.tanh(x / C_LIGHT)).toFixed(4) + ' c' : x.toFixed(0) + ' м/с';
+    if (sim) rh += `<div class="kv"><span>Δv ступени / всего</span><b>${dvTxt(sim.cur)} / ${dvTxt(sim.total)}</b></div><div class="kv"><span>TWR (${esc(v.body.name)})</span><b>${sim.twr.toFixed(2)}</b></div>`;
     $('#h-res').innerHTML = rh;
     // actions + science
     let ah = '<div class="ttl">Действия</div><div class="mbtns">';
@@ -455,6 +476,16 @@ const ui = {
     if (scn) ah += `<button data-a="scan" class="${scn.st.scan !== false ? 'on' : ''}">Картограф ${scn.st.scan !== false ? 'вкл' : 'выкл'}</button>`;
     if (b.terrain) ah += `<button data-a="atlas">Атлас</button>`;
     ah += `<button data-a="ksc">В космоцентр</button></div>`;
+    if (SCIFI.on && warpCore(v)) {
+      const why = v.warpOn ? null : warpWhyNot(v), ts = targetState(W, t), f = v.warpF || 10;
+      const eta = ts ? V.dist(V.add(bodyAbsPos(b, t), v.r), ts.r) / (f * C_LIGHT) : null;
+      ah += `<div class="ttl" style="margin-top:8px">Варп-двигатель (V)</div>
+        <div class="kv"><span>Скорость пузыря</span><b>${f.toLocaleString('ru-RU')}c</b></div>
+        <div class="kv"><span>Экзотика</span><b>${vesselRes(v, 'EXOTIC').toFixed(2)} т · ${(PART[warpCore(v).id].warp.k * f * f * LY / C_LIGHT).toFixed(2)} т/св. г.</b></div>
+        ${eta != null ? `<div class="kv"><span>До цели</span><b>${fmtDur(eta, true)}</b></div>` : ''}
+        ${why ? `<div class="dim" style="font-size:12px">${esc(why)}</div>` : ''}
+        <div class="mbtns"><button data-a="warpdn">−</button><button data-a="warp" class="${v.warpOn ? 'on' : 'acc'}">${v.warpOn ? 'Выйти из варпа' : 'Включить варп'}</button><button data-a="warpup">+</button></div>`;
+    }
     if (W.target && !v.landed && !v.prelaunch && !isKerbalVessel(v)) {
       ah += `<div class="ttl" style="margin-top:8px">Перелёт</div><div class="mbtns"><button data-a="xfer">Перелёт к цели</button>${v.nodes && v.nodes.length ? '<button data-a="refine">Уточнить</button>' : ''}${targetVessel(W) ? '<button data-a="match">Уравнять скорость</button>' : ''}</div>`;
     }
@@ -483,7 +514,8 @@ const ui = {
         for (const p of pods) {
           ah += `<div class="sciitem"><div class="dim">${esc(PART[p.id].name)} · мест ${p.crew.length}/${podSeats(p)}</div>` + (p.crew.map(id => {
             const c = crewById(Game.g, id); if (!c) return '';
-            return `<div class="row"><span class="grow">${esc(c.name)} <span class="dim">${CREW_ROLES[c.role]} ${'★'.repeat(crewLevel(c))}</span></span><button data-a="eva" data-r="${p.rid}" data-x="${id}" style="padding:2px 7px">Выход</button></div>`;
+            const age = crewAge(c);
+            return `<div class="row"><span class="grow">${esc(c.name)} <span class="dim">${CREW_ROLES[c.role]} ${'★'.repeat(crewLevel(c))}${c.cryo ? ' · ❄ сон' : ''}${age >= 45 || c.cryo ? ' · ' + fmtYears(age) : ''}</span></span><button data-a="eva" data-r="${p.rid}" data-x="${id}" style="padding:2px 7px">Выход</button></div>`;
           }).join('') || '<div class="dim">пусто</div>') + '</div>';
         }
       }
@@ -630,13 +662,14 @@ const ui = {
     this.clear();
     const g = Game.g;
     const X = (c) => 30 + c * 205, Y = (r) => 20 + r * 105;
+    const TECH = TECH_ALL.filter(t => !t.scifi || SCIFI.on);   // the science-fiction branch only in that mode
     let lines = '';
     for (const t of TECH) for (const r of t.req) { const a = TECH_BY_ID[r]; lines += `<line x1="${X(a.col) + 170}" y1="${Y(a.row) + 30}" x2="${X(t.col)}" y2="${Y(t.row) + 30}" stroke="${g.techs.includes(r) ? '#5dff9a' : '#556'}" stroke-width="2"/>`; }
     const nodes = TECH.map(t => {
       const st = g.techs.includes(t.id) ? 'done' : techAvailable(g, t) ? 'avail' : 'locked';
       return `<div class="tnode ${st}" data-t="${t.id}" style="left:${X(t.col)}px;top:${Y(t.row)}px"><b>${esc(t.name)}</b><span class="c">${st === 'done' ? '✓ изучено' : t.cost + ' науки'}</span> <span class="dim">· ${t.parts.length} дет.</span></div>`;
     }).join('');
-    this.root.innerHTML = `<div id="rnd">${this.topbar('НИИ — ТЕХНОЛОГИИ', '<button id="r-back">Назад</button>')}<div class="tree scroll"><div class="canvas"><svg width="1700" height="760">${lines}</svg>${nodes}</div></div><div class="detail panel" id="r-det"><span class="dim">Щёлкните по технологии.</span></div></div>`;
+    this.root.innerHTML = `<div id="rnd">${this.topbar('НИИ — ТЕХНОЛОГИИ', '<button id="r-back">Назад</button>')}<div class="tree scroll"><div class="canvas" style="width:${X(Math.max(...TECH.map(t => t.col))) + 220}px"><svg width="${X(Math.max(...TECH.map(t => t.col))) + 220}" height="760">${lines}</svg>${nodes}</div></div><div class="detail panel" id="r-det"><span class="dim">Щёлкните по технологии.</span></div></div>`;
     $('#r-back').onclick = () => Game.toKSC();
     this.root.querySelector('.canvas').onclick = (e) => {
       const n = e.target.closest('.tnode'); if (!n) return;
@@ -738,7 +771,7 @@ const ui = {
   // ---------------------------------------------------------------- transfer planner (porkchop)
   planner() {
     const g = Game.g, W = Game.world, A = W && Game.screen === 'flight' ? W.active : null;
-    const sibs = BODIES.filter(b => b.parent && b.vis.type !== 'star' && BODIES.some(o => o !== b && o.parent === b.parent));
+    const sibs = BODIES.filter(b => b.parent && b.vis.type !== 'star' && !b.bh && BODIES.some(o => o !== b && o.parent === b.parent));
     let from = A && sibs.includes(A.body) ? A.body : BODY.earth;
     const tg = W && W.target && BODY[W.target];
     let to = tg && tg.parent === from.parent && tg !== from ? tg : from.id === 'earth' ? BODY.mars : sibs.find(b => b.parent === from.parent && b !== from);
@@ -917,7 +950,7 @@ const ui = {
     this.clear();
     const g = Game.g;
     const where = (c) => {
-      if (c.status === 'kia') return '<span class="bad">погиб(ла)</span>';
+      if (c.status === 'kia') return c.old ? `<span class="dim">умер(ла) от старости в полёте, ${fmtYears(crewAge(c))}</span>` : '<span class="bad">погиб(ла)</span>';
       if (c.status === 'missing') return '<span class="accent">ждёт спасения</span>';
       if (c.status === 'ready') return '<span class="good">готов(а)</span>';
       const s = g.vessels.find(v => (v.parts || []).some(p => p.crew && p.crew.includes(c.id)));
@@ -1018,7 +1051,7 @@ const ui = {
       <p><kbd>W</kbd><kbd>S</kbd> тангаж · <kbd>A</kbd><kbd>D</kbd> рыскание · <kbd>Q</kbd><kbd>E</kbd> крен</p>
       <p><kbd>Shift</kbd>/<kbd>Ctrl</kbd> тяга ± · <kbd>Z</kbd> полная · <kbd>X</kbd> ноль</p>
       <p><kbd>Пробел</kbd> следующая ступень</p>
-      <p><kbd>T</kbd> SAS · <kbd>R</kbd> РСУ · <kbd>G</kbd> опоры и шасси · <kbd>B</kbd> тормоз · <kbd>CapsLock</kbd> точное управление</p>
+      <p><kbd>T</kbd> SAS · <kbd>R</kbd> РСУ · <kbd>G</kbd> опоры и шасси · <kbd>U</kbd> прожекторы · <kbd>B</kbd> тормоз · <kbd>CapsLock</kbd> точное управление</p>
       <p>Самолёт: <kbd>S</kbd> взять на себя, <kbd>A</kbd><kbd>D</kbd> руль и руление по полосе. Ровер: <kbd>W</kbd><kbd>S</kbd> газ, <kbd>A</kbd><kbd>D</kbd> руль</p>
       <p><kbd>H</kbd><kbd>N</kbd> РСУ вперёд/назад · <kbd>I</kbd><kbd>K</kbd> вверх/вниз · <kbd>J</kbd><kbd>L</kbd> влево/вправо</p>
       <p><kbd>M</kbd> карта · <kbd>Tab</kbd> фокус на карте · щелчок по траектории — манёвр</p>
@@ -1030,6 +1063,8 @@ const ui = {
       <p>Мышь: тянуть — вращение камеры, колесо — масштаб</p>
       <p><b>Как выйти на орбиту:</b> старт вертикально, на 1–2 км начните плавно наклонять на восток (<kbd>D</kbd>), к 40 км почти горизонтально. Когда апоцентр выше 75 км — выключите тягу, у апоцентра разгоняйтесь по прогрейду, пока перицентр не выйдет из атмосферы (70 км).</p>
       <p><b>Возвращение:</b> тормозите ретрогрейдом до перицентра ~30 км, сбросьте всё кроме капсулы, держите теплощит вперёд (SAS ретрогрейд), парашюты откроются сами, когда станет безопасно.</p>
+      <p><b>К звёздам:</b> со включённым SAS долгий разгон (ион, термоядерный, парус) продолжается под ускорением времени — корабль держит направление SAS. Вне сфер влияния планет доступно ×10⁸ и ×10⁹. На карте отдалите камеру: звёзды-цели подписаны (α Центавра, Барнард, ε Эридана, TRAPPIST-1). Между звёздами солнечные панели бесполезны — берите РИТЭГ или реактор. Перелёт длится столетия: экипаж стареет, спасает криокапсула.</p>
+      <p><b>Режим фантастики</b> (галочка в новой игре): <kbd>V</kbd> — варп-двигатель, курс по носу корабля (держите SAS «к цели»), только вне сфер влияния планет. Червоточины «Ариадна» у L4 Земли и «Нить» у Сатурна ведут к TRAPPIST-1 и центру Галактики. К звёздным чёрным дырам не подлетайте ближе нескольких сотен радиусов горизонта — разорвёт приливом; у Стрельца A* можно пролететь у самого горизонта.</p>
       <p class="dim">Щёлкните, чтобы закрыть · F1</p></div>`;
     h.onclick = () => h.remove();
     document.body.appendChild(h);

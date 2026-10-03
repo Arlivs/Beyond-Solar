@@ -8,6 +8,7 @@
 // fin normal forces, parachutes, re-entry heating, spring-damper ground contact.
 
 const PHYS_DT = 0.02;
+const TIDAL_MAX = 300;               // m/s^2 of stretch across the hull a ship survives near a black hole
 const HEAT_K = 4.2e-3;          // convective heating constant (tuned for 1:10 velocities)
 const ABLATE_J = 8e9;           // J absorbed per tonne of ablator
 const SIGMA = 5.670e-8;
@@ -109,7 +110,7 @@ function hasControl(v) {
   for (const p of v.parts) {
     if (p.dead) continue;
     const c = PART[p.id].command;
-    if (!c) continue;
+    if (!c || PART[p.id].cryo) continue;                                       // sleepers do not fly the ship
     if (c.crew > 0) { if (!p.crew || p.crew.length) return true; continue; }   // a pod needs someone aboard
     if (vesselRes(v, 'ELEC') > 0.01) return true;
   }
@@ -303,14 +304,13 @@ function physicsStep(v, dt, ut, ctl, hooks) {
     }
     if (thr <= 0) continue;
     const md = engineMdot(e) * thr * airF;
-    const need = md * dt / 1000;
+    // an electric engine short of power runs (and burns propellant) only at the fraction it gets
+    let fe = 1;
+    if (e.elec) { const en = e.elec * thr * dt, eg = poolDraw(v, allRids(v), 'ELEC', en); fe = en > 0 ? eg / en : 0; }
+    const need = md * dt / 1000 * fe;
     const key = e.prop;
     const got = poolDraw(v, engineSources(v, p), key, need);
-    let f = need > 0 ? got / need : 0;
-    if (e.elec) {
-      const en = e.elec * thr * dt, eg = poolDraw(v, allRids(v), 'ELEC', en);
-      f = Math.min(f, en > 0 ? eg / en : 0);
-    }
+    const f = need > 0 ? got / need * fe : 0;
     if (f < 1e-4) { if (!p.st.eng.out) { p.st.eng.out = true; hooks && hooks.event && hooks.event('flameout', { part: p }); } continue; }
     p.st.eng.out = false;
     const Fn = md * engineIsp(e, atm.p) * G0 * f;
@@ -326,6 +326,9 @@ function physicsStep(v, dt, ut, ctl, hooks) {
   }
   if (thrustTotal > 0) F = V.add(F, Q.rot(v.q, Fe));
   v.thrustNow = thrustTotal;
+  const Fs = sailForce(v, ut);
+  F = V.add(F, Fs);
+  v.sailNow = V.len(Fs);
 
   // attitude control
   const auth = torqueAuthority(v, mp, thrusts);
@@ -458,7 +461,12 @@ function physicsStep(v, dt, ut, ctl, hooks) {
   let contact = false;
   const bnd = v._bnd || (v._bnd = vesselBounds(v));
   v.radarAlt = alt;
-  if (!b.gas && alt < b.hMax + bnd.size + 60) {
+  // a black hole: past the horizon nothing comes back; well before it a stellar-mass hole tears a ship apart
+  if (b.bh) {
+    if (alt < 0) { hooks && hooks.event && hooks.event('crushed', {}); destroyVessel(v, hooks, `Пересёк горизонт событий: ${b.name}`); return; }
+    if (2 * b.mu * bnd.size / (rLen * rLen * rLen) > TIDAL_MAX) { hooks && hooks.event && hooks.event('crushed', {}); destroyVessel(v, hooks, `Разорван приливными силами у ${b.name} («спагеттификация»)`); return; }
+  }
+  if (!b.gas && !b.bh && !b.void && !b.wh && !b.mega && alt < b.hMax + bnd.size + 60) {
     const gnd = vesselGround(v, ut);
     v.radarAlt = alt - gnd.h;
     if (v.radarAlt < bnd.size + 50) { contact = groundContact(v, dt, ut, mp, F, tau, hooks, gnd); if (wheelContacts(v, dt, mp, F, tau, hooks, gnd, ctl)) contact = true; }
@@ -468,7 +476,8 @@ function physicsStep(v, dt, ut, ctl, hooks) {
   // integrate translation
   const acc = V.add(gAcc, V.scale(F, 1 / m));
   v.accel = V.len(V.scale(F, 1 / m)) / G0; // g-load from non-gravity forces
-  v.v = V.addS(v.v, acc, dt);
+  if (SCIFI.on) v.v = relAdd(V.addS(v.v, gAcc, dt), V.scale(F, dt / lorentz(v.v) / m));
+  else v.v = V.addS(v.v, acc, dt);
   v.r = V.addS(v.r, v.v, dt);
   // integrate rotation (Euler's equations, diagonal inertia)
   const I = mp.I, w = v.w;
@@ -686,19 +695,36 @@ function applyHeating(v, dt, flux, ua, sp, mp, hooks) {
   if (burnt) explodePart(v, burnt.rid, hooks, 'перегрев');
 }
 
-function tickResources(v, dt, ut, active, u, mp) {
-  // electricity: probe cores, reaction wheels, solar panels
+// electricity per second: generators (solar by starlight, RTGs, reactors) and steady consumers
+function elecRates(v, ut, active) {
   let use = 0, gen = 0;
   for (const p of v.parts) {
     if (p.dead) continue;
     const d = PART[p.id];
     if (d.command && d.command.elecUse) use += d.command.elecUse;
     if (d.scanner && p.st.scan !== false && active) use += d.scanner.elec;
+    if (d.light && p.st.light) use += d.light.elec;
+    if (d.cryo && p.crew && p.crew.length) use += d.cryo.elec;
+    if (d.gen) gen += d.gen;
     if (d.solar && p.st.solar) {
       if (v._sunT == null || ut - v._sunT > 2 || ut < v._sunT) { v._sunF = sunExposure(v.body, v.r, ut); v._sunT = ut; }
       gen += d.solar.rate * v._sunF * (d.shape === 'solarBig' ? 1 : 0.55);
     }
   }
+  return { use, gen };
+}
+// fill batteries proportionally to free capacity
+function elecFill(v, amount) {
+  const all = allRids(v);
+  let free = 0;
+  for (const r of all) { const p = v.parts[r]; const mx = PART[p.id].res.ELEC || 0; free += Math.max(0, mx - (p.res.ELEC || 0)); }
+  if (free <= 0 || amount <= 0) return;
+  const add = Math.min(free, amount);
+  for (const r of all) { const p = v.parts[r]; const mx = PART[p.id].res.ELEC || 0; if (mx > 0) p.res.ELEC = (p.res.ELEC || 0) + add * (mx - (p.res.ELEC || 0)) / free; }
+}
+function tickResources(v, dt, ut, active, u, mp) {
+  // electricity: probe cores, reaction wheels, lights, generators
+  let { use, gen } = elecRates(v, ut, active);
   if (u) {
     const used = (Math.abs(u[0]) + Math.abs(u[1]) + Math.abs(u[2])) / 3;
     let wheel = 0;
@@ -711,17 +737,45 @@ function tickResources(v, dt, ut, active, u, mp) {
       if (sasUse > 0) poolDraw(v, allRids(v), 'MONO', sasUse);
     }
   }
-  const all = allRids(v);
-  if (use > 0) poolDraw(v, all, 'ELEC', use * dt);
-  if (gen > 0) {
-    // fill batteries proportionally to free capacity
-    let free = 0;
-    for (const r of all) { const p = v.parts[r]; const mx = PART[p.id].res.ELEC || 0; free += Math.max(0, mx - (p.res.ELEC || 0)); }
-    if (free > 0) {
-      const add = Math.min(free, gen * dt);
-      for (const r of all) { const p = v.parts[r]; const mx = PART[p.id].res.ELEC || 0; if (mx > 0) p.res.ELEC = (p.res.ELEC || 0) + add * (mx - (p.res.ELEC || 0)) / free; }
-    }
+  if (use > 0) poolDraw(v, allRids(v), 'ELEC', use * dt);
+  if (gen > 0) elecFill(v, gen * dt);
+  if (SCIFI.on) produceExotic(v, dt);
+}
+
+// ---- exotic matter synthesis (science-fiction bases): generator power only, into the free trap capacity ----
+function produceExotic(v, dt) {
+  if (v._synth === false || !(dt > 0)) return;
+  const syn = v.parts.filter(p => !p.dead && PART[p.id].synth);
+  v._synth = syn.length > 0;
+  if (!syn.length) return;
+  const R = elecRates(v, v._ut || 0, false), need = syn.reduce((s, p) => s + PART[p.id].synth.elec, 0);
+  const f = clamp((R.gen - R.use) / need, 0, 1);
+  let make = f * syn.reduce((s, p) => s + PART[p.id].synth.rate, 0) * dt;
+  for (const p of v.parts) {
+    if (p.dead || make <= 0) continue;
+    const cap = PART[p.id].res.EXOTIC; if (!cap) continue;
+    const add = Math.min(cap - (p.res.EXOTIC || 0), make);
+    if (add > 0) { p.res.EXOTIC = (p.res.EXOTIC || 0) + add; make -= add; v.massDirty = true; }
   }
+}
+
+// ---- solar sails: a perfect mirror pushes along its normal with 2·P·A·cos²θ (P = 4.56 µN/m² at Earth's distance) ----
+function sailDeployed(v) { return v.parts.some(p => !p.dead && p.st.sail); }
+function sailForce(v, ut) {
+  if (!sailDeployed(v)) return [0, 0, 0];
+  if (v._slT == null || Math.abs(ut - v._slT) > 1 || v._slB !== v.body) {
+    const b = v.body, bAbs = bodyAbsPos(b, ut), pAbs = V.add(bAbs, v.r), L = starLight(pAbs, ut), s = V.norm(V.sub(pAbs, L.pos));
+    const shade = !b.star && V.dot(v.r, s) > 0 && V.len(V.reject(v.r, s)) < b.R;   // in the shadow of its own body
+    v._sl = { s, f: shade ? 0 : L.fMain }; v._slT = ut; v._slB = b;
+  }
+  const { s, f } = v._sl;
+  let F = [0, 0, 0];
+  for (const p of v.parts) {
+    if (p.dead || !p.st.sail) continue;
+    const n = Q.rot(v.q, partAxis(p)), c = V.dot(n, s);
+    F = V.addS(F, n, Math.sign(c) * 2 * 4.56e-6 * PART[p.id].sail.area * f * c * c);
+  }
+  return F;
 }
 
 // ---- part loss / staging ----
@@ -812,6 +866,7 @@ function activateStage(v, ut, hooks) {
     const d = PART[p.id];
     if (d.engine) { p.st.eng.on = true; p.st.eng.out = false; }
     if (d.chute && p.st.chute === 'stowed') p.st.chute = 'armed';
+    if (d.sail) p.st.sail = true;
     if (d.decoupler && p.pEdge != null && !v.edges[p.pEdge].cut) { v.edges[p.pEdge].cut = true; decoupled = true; }
   }
   if (v.prelaunch) { v.prelaunch = false; if (v.lock) unlock(v); hooks && hooks.event && hooks.event('launch', { vessel: v }); }
@@ -848,6 +903,7 @@ function situationText(v, ut) {
   if (v.landed || v.inContact) return 'На поверхности: ' + b.name;
   const alt = V.len(v.r) - b.R;
   if (b.atm && alt < b.atm.top) return 'Полёт в атмосфере: ' + b.name;
+  if (b.void) return 'Открытый космос · ' + b.parent.name;
   const el = elFromState(v.r, v.v, b.mu, ut);
   if (el.e >= 1 || el.ra > b.soi) return 'Уход с орбиты: ' + b.name;
   if (el.rp < b.R + (b.atm ? b.atm.top : 0)) return 'Суборбитальный полёт: ' + b.name;
@@ -882,7 +938,11 @@ function railsAdvance(v, tNow, tTarget) {
       }
       const st = elState(pt.el, tTarget); v.r = st.r; v.v = st.v; return { t: tTarget, event: null };
     }
-    if (ev === 'impact' && tEv - 60 <= tTarget) {
+    if (ev === 'impact' && v.body.wh && tEv <= tTarget) {   // into a wormhole's throat: out of the other mouth
+      const st = elState(pt.el, tEv); v.r = st.r; v.v = st.v; wormholeJump(v);
+      t = tEv; railsRepredict(v, t); return { t, event: 'soi' };
+    }
+    if (ev === 'impact' && tEv - 60 <= tTarget && !v.body.wh) {
       const tt = Math.max(t, tEv - 60);
       const st = elState(pt.el, tt); v.r = st.r; v.v = st.v; return { t: tt, event: 'impact' };
     }
@@ -905,11 +965,186 @@ function railsAdvance(v, tNow, tTarget) {
   return { t, event: null };
 }
 
+// ---- special relativity (science-fiction mode): velocities compose, so nothing outruns light ----
+function lorentz(u) { return 1 / Math.sqrt(Math.max(1 - V.len2(u) / (C_LIGHT * C_LIGHT), 1e-12)); }
+// velocity u of the ship in the frame, after a kick w measured in its own (instantaneous rest) frame
+function relAdd(u, w) {
+  const c2 = C_LIGHT * C_LIGHT, ul = V.len(u);
+  if (ul < 1e-9) return V.add(u, w);
+  const n = V.scale(u, 1 / ul), wpar = V.dot(w, n), wperp = V.sub(w, V.scale(n, wpar)), g = lorentz(u);
+  return V.scale(V.add(V.scale(n, ul + wpar), V.scale(wperp, 1 / g)), 1 / (1 + ul * wpar / c2));
+}
+
+// ---- powered flight on rails: long burns (ion, fusion, sails) continue under time warp ----
+// Needs SAS: the attitude snaps to the SAS direction. Gravity + thrust are integrated (velocity Verlet) with steps
+// of a fraction of the local orbital period and of the speed; at most maxSteps per call, so a heavy burn simply
+// slows the warp down. Returns {t, event} like railsAdvance; extra events: 'burnout', 'node' (manoeuvre done).
+function railsThrustOK(v) { return !!(v.sas && !v.lock && !v.landed && hasControl(v)); }
+function railsPowered(v) { return thrustWanted(v) || sailDeployed(v); }
+function railsAttitude(v, ut) {
+  if (!v.sasMode || v.sasMode === 'stab') return;
+  const d = sasTargetDir(v, v.sasMode, ut);
+  if (!d) return;
+  const ref = ctrlRef(v), fwd = Q.rot(ref ? Q.mul(v.q, ref) : v.q, [0, 1, 0]);
+  v.q = Q.norm(Q.mul(Q.fromTo(fwd, d), v.q));
+}
+// thrust of the running engines over h seconds (world vector, N); draws propellant and electricity
+function railsThrust(v, h, ut) {
+  const eng = [];
+  let elecNeed = 0;
+  for (const p of v.parts) {
+    if (p.dead || !p.st.eng || !p.st.eng.on || p.st.eng.out) continue;
+    const e = PART[p.id].engine;
+    if (e.air) continue;
+    const thr = e.throttle ? v.throttle : 1;
+    if (thr <= 0) continue;
+    eng.push([p, e, thr]);
+    if (e.elec) elecNeed += e.elec * thr;
+  }
+  // electricity: what the generators make during the step plus the batteries
+  const R = elecRates(v, ut, true), stored = vesselRes(v, 'ELEC');
+  const fe = elecNeed > 0 ? clamp((stored / h + R.gen - R.use) / elecNeed, 0, 1) : 1;
+  const net = (R.gen - R.use - elecNeed * fe) * h;
+  if (net > 0) elecFill(v, net); else poolDraw(v, allRids(v), 'ELEC', -net);
+  let F = [0, 0, 0];
+  for (const [p, e, thr] of eng) {
+    const ef = e.elec ? fe : 1, md = engineMdot(e) * thr, need = md * h / 1000 * ef;   // power-starved: burns only what it can use
+    const got = poolDraw(v, engineSources(v, p), e.prop, need);
+    const f = need > 0 ? got / need * ef : 0;
+    p.st.eng.thr = thr * f;
+    if (f < 1e-4) { p.st.eng.out = true; continue; }
+    F = V.addS(F, Q.rot(v.q, partAxis(p)), md * e.ispVac * G0 * f);
+  }
+  const Fs = sailForce(v, ut);
+  v.sailNow = V.len(Fs);
+  return V.add(F, Fs);
+}
+// nominal vacuum thrust (N) and mass flow (kg/s) of the running engines, nothing drawn
+function railsNominal(v) {
+  let F = 0, md = 0;
+  for (const p of v.parts) {
+    if (p.dead || !p.st.eng || !p.st.eng.on || p.st.eng.out) continue;
+    const e = PART[p.id].engine;
+    if (e.air) continue;
+    const m = engineMdot(e) * (e.throttle ? v.throttle : 1);
+    F += m * e.ispVac * G0; md += m;
+  }
+  return { F, md };
+}
+function railsPoweredAdvance(v, tNow, tTarget, maxSteps) {
+  let t = tNow, n = 0;
+  v.rails.patch = null;
+  v.w = [0, 0, 0];
+  // a manoeuvre burn counts down its remaining Δv (kept on the vessel until the trajectory refreshes it)
+  const burn = v.sasMode === 'node' && v.nodeBurn ? { rem: v.nodeBurn.slice(), d0: V.norm(v.nodeBurn) } : null;
+  const done = (event) => { if (burn) v.nodeBurn = burn.rem; return { t, event }; };
+  while (t < tTarget && n++ < maxSteps) {
+    const b = v.body, mu = b.mu;
+    railsAttitude(v, t);
+    // step: a fraction of the local orbit, of the speed change, and at most 2% of the mass burnt
+    const rl = V.len(v.r), m0 = massProps(v).m, nom = railsNominal(v), aT = nom.F / m0;
+    let h = Math.min(tTarget - t, TAU * Math.sqrt(rl * rl * rl / mu) / 300);
+    if (aT > 0) h = Math.min(h, Math.max(0.02 * V.len(v.v), 20) / aT, 0.02 * m0 / nom.md);
+    if (burn && aT > 0) h = Math.min(h, Math.max(V.len(burn.rem) / aT, 0.05));
+    h = Math.max(h, 1e-3);
+    // near light speed (science-fiction mode) the engines burn by the ship's own clock and kicks compose
+    const hp = SCIFI.on ? h / lorentz(v.v) : h;
+    const Fv = railsThrust(v, hp, t), aTv = V.scale(Fv, 2 / (m0 + massProps(v).m));
+    const g0 = V.scale(v.r, -mu / (rl * rl * rl));
+    if (SCIFI.on) {
+      const vh = relAdd(V.addS(v.v, g0, h / 2), V.scale(aTv, hp / 2));
+      v.r = V.addS(v.r, vh, h);
+      const r2 = V.len(v.r);
+      v.v = relAdd(V.addS(vh, V.scale(v.r, -mu / (r2 * r2 * r2)), h / 2), V.scale(aTv, hp / 2));
+    } else {
+      const vh = V.addS(v.v, V.add(g0, aTv), h / 2);
+      v.r = V.addS(v.r, vh, h);
+      const r2 = V.len(v.r);
+      v.v = V.addS(vh, V.add(V.scale(v.r, -mu / (r2 * r2 * r2)), aTv), h / 2);
+    }
+    t += h;
+    v.thrustNow = V.len(Fv);
+    if (burn) {
+      burn.rem = V.sub(burn.rem, V.scale(aTv, hp));
+      if (V.dot(burn.rem, burn.d0) <= 0.05) { v.throttle = 0; return done('node'); }
+    }
+    if (!railsPowered(v)) return done('burnout');
+    if (checkSOI(v, t)) return done('soi');
+    const alt = V.len(v.r) - v.body.R;
+    if (v.body.atm && alt < v.body.atm.top) return done('atmo');
+    if (alt < (v.body.hMax || 0) + 2000) return done('impact');
+  }
+  return done(null);
+}
+
+// ---- warp drive (science-fiction mode) ----
+// An Alcubierre bubble carries the ship along its nose at f light speeds; inside it the ship is at rest, so its
+// own velocity in the frame is kept for after the drop-out. Exotic matter burns at k f^2 per second (per light-year it
+// grows with f), the core draws power. It works only out in a star's frame, away from the star itself, and the ship
+// drops out by itself at the sphere of influence of anything it is heading into.
+const WARP_FACTORS = [1, 3, 10, 30, 100, 300, 1000, 3000, 10000, 30000, 100000];
+function warpCore(v) { return v.parts.find(p => !p.dead && PART[p.id].warp); }
+function warpMinR(b) { return b.void ? 0 : b.R * (b.bh ? 200 : 50); }
+function warpWhyNot(v) {
+  if (!SCIFI.on) return 'только в режиме фантастики';
+  if (!warpCore(v)) return 'нет варп-ядра';
+  if (vesselRes(v, 'EXOTIC') <= 1e-6) return 'нет экзотической материи';
+  if (v.lock || v.landed || v.inContact) return 'корабль на поверхности';
+  const b = v.body;
+  if (!(b.star || b.void || b.bh)) return `внутри сферы влияния: ${b.name} — сначала уйдите к звезде`;
+  if (!b.void && V.len(v.r) < warpMinR(b)) return `слишком близко к ${b.name}`;
+  return null;
+}
+function warpAdvance(v, tNow, tTarget) {
+  if (v.body.void) voidLeave(v);
+  const W = PART[warpCore(v).id].warp, f = v.warpF || 10, s = f * C_LIGHT;
+  let t = tNow, guard = 0;
+  const out = (event, extra) => Object.assign({ t, event }, extra || {});
+  while (t < tTarget && guard++ < 2000) {
+    railsAttitude(v, t);
+    const dir = Q.rot(ctrlQ(v), [0, 1, 0]), b = v.body, rl = V.len(v.r);
+    // how far it may go before it could touch anything: nearest sphere of influence, own edge, the star
+    let room = Infinity;
+    for (const c of b.children) room = Math.min(room, V.dist(v.r, bodyRelState(c, t).r) - c.soi);
+    if (b.parent) room = Math.min(room, b.soi - rl);
+    if (V.dot(dir, v.r) < 0) room = Math.min(room, rl - warpMinR(b));
+    let L = Math.min(s * (tTarget - t), Math.max(room, s * 1e-4)), dt = L / s;
+    // power: generators first, the batteries cover a shortfall only for so long
+    const R = elecRates(v, t, true), spare = R.gen - R.use, short = W.elec - spare;
+    let flat = false;
+    if (short > 0) { const tMax = vesselRes(v, 'ELEC') / short; if (tMax < dt) { dt = tMax; L = dt * s; flat = true; } poolDraw(v, allRids(v), 'ELEC', short * dt); }
+    // exotic matter for this leg
+    const need = W.k * f * f * dt, got = poolDraw(v, allRids(v), 'EXOTIC', need), frac = need > 0 ? got / need : 1;
+    v.r = V.addS(v.r, dir, L * frac); t += dt * frac;
+    if (frac < 0.999) return out('empty');
+    if (flat) return out('power');
+    if (b.parent && V.len(v.r) > b.soi) { const ps = bodyRelState(b, t); v.r = V.add(v.r, ps.r); v.v = V.add(v.v, ps.v); v.body = b.parent; continue; }
+    for (const c of b.children) {
+      const cs = bodyRelState(c, t);
+      if (V.dist(v.r, cs.r) < c.soi) { v.r = V.sub(v.r, cs.r); v.v = V.sub(v.v, cs.v); v.body = c; return out('arrive', { body: c }); }
+    }
+    if (!b.void && V.len(v.r) < warpMinR(b)) return out('close');
+  }
+  return out(null);
+}
+
+// a wormhole throat: out of the other mouth, on the far side, with the same velocity (now heading away from it)
+function wormholeJump(v) {
+  const b = v.body, to = BODY[b.wh.to];
+  if (!to) return false;
+  const rl = V.len(v.r);
+  v.r = V.scale(v.r, -(to.R * 1.05 + 5) / Math.max(rl, 1e-6));
+  v.body = to;
+  return true;
+}
+
 // SOI transitions during physics
 function checkSOI(v, ut) {
   const b = v.body;
+  if (b.wh && V.len(v.r) < b.R) { wormholeJump(v); return true; }
   const rl = V.len(v.r);
   if (b.parent && rl > b.soi) {
+    if (b.void) { voidLeave(v); return true; }
     const ps = bodyRelState(b, ut);
     v.r = V.add(v.r, ps.r); v.v = V.add(v.v, ps.v); v.body = b.parent;
     return true;

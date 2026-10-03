@@ -992,3 +992,262 @@ module.exports.compat = async (p, shot) => {
   console.log('old save:', r);
   await p.waitForTimeout(1500);
 };
+// Stars: the sky at any map zoom and far from the Sun; exoplanet views; an interstellar burn under time warp.
+module.exports.stars = async (p, shot) => {
+  // bright-pixel count of the top third of the frame, read back right after rendering
+  const skyPx = () => p.evaluate(() => {
+    renderFlight(0.016);
+    const gl = RV.renderer.getContext(), w = gl.drawingBufferWidth, h = gl.drawingBufferHeight, hh = Math.floor(h / 3), px = new Uint8Array(w * hh * 4);
+    gl.readPixels(0, h - hh, w, hh, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    let n = 0; for (let i = 0; i < px.length; i += 4) if (px[i] + px[i + 1] + px[i + 2] > 90) n++;
+    return n;
+  });
+  await p.evaluate(() => { Game.newGame('sandbox'); Game.launch(stockDesigns()[0]); Game.toggleMap(); });
+  await wait(p, 1500);
+  const zoom = [];
+  for (const d of [3e7, 3e9, 3e11, 3e13, 1e16, 1e17]) {
+    await p.evaluate((d) => { MAP.focus = { kind: 'body', id: 'earth' }; MAP.dist = d; MAP.pitch = 0.35; }, d);
+    await wait(p, 300);
+    zoom.push(d.toExponential(0) + ':' + await skyPx());
+    if (d === 3e11 || d === 1e17) await shot('st_map_' + d.toExponential(0));
+  }
+  console.log('map sky bright px', zoom.join(' '));
+  // a fusion ship far out, burning prograde towards α Centauri under warp
+  const r0 = await p.evaluate(() => {
+    const d = makeDesign('Тест-Д', [{ id: 'pod_k3', r: [{ sym: 2, y: -0.3, ang: 0, part: 'light' }] }, 'reactor', 'tank_he3_l', 'eng_fusion']);
+    Game.launch(d);
+    const W = Game.world, A = W.active, T = BODY.acena, t = Game.g.ut;
+    A.lock = null; A.landed = false; A.prelaunch = false; A.prelaunchHold = false; A.situation = 'SPACE';
+    A.body = BODY.sun;
+    const dir = V.norm(T.pos);
+    A.r = V.scale(dir, 60 * AU * SCALE_L); A.v = V.scale(dir, 30000);
+    A.q = Q.fromTo([0, 1, 0], dir); A.w = [0, 0, 0];
+    Game.stage();
+    A.sas = true; A.sasMode = 'pro'; A.throttle = 1;
+    if (W.map) Game.toggleMap();
+    return { fuel: vesselRes(A, 'FUSION'), m: massProps(A).m };
+  });
+  console.log('start', JSON.stringify(r0));
+  await wait(p, 1500); await shot('st_burn');
+  // warp up to the top while burning
+  for (let i = 0; i < 11; i++) await p.evaluate(() => Game.warpUp());
+  const prog = [];
+  for (let i = 0; i < 12; i++) {
+    await wait(p, 1000);
+    prog.push(await p.evaluate(() => { const A = Game.world.active; return `${Game.warpRate().toExponential(0)} v=${(V.len(A.v) / 1000).toFixed(0)}km/s fuel=${vesselRes(A, 'FUSION').toFixed(1)} ${A.body.id} ${fmtDate(Game.g.ut)}`; }));
+  }
+  console.log(prog.join('\n'));
+  const tr = await p.evaluate(() => { computeTraj(); return (Game.world.traj || []).map(x => x.body.id + ':' + x.end + (x.next ? '>' + x.next.id : '')).join(' '); });
+  console.log('trajectory', tr);
+  await p.evaluate(() => Game.toggleMap()); await p.evaluate(() => { MAP.focus = { kind: 'vessel' }; MAP.dist = 6e15; }); await wait(p, 800); await shot('st_cruise_map');
+  await p.evaluate(() => Game.toggleMap());
+  // coast on rails to the encounter
+  for (let i = 0; i < 40; i++) {
+    const s = await p.evaluate(() => { const W = Game.world, A = W.active; if (A.throttle > 0) A.throttle = 0; if (W.warp < 11) Game.warpUp(); return A.body.id + ' ' + (ORIGIN.b ? ORIGIN.b.id : 'sun') + ' ' + W.warp; });
+    if (!s.startsWith('sun')) { console.log('arrived:', s, await p.evaluate(() => fmtDate(Game.g.ut))); break; }
+    await wait(p, 1000);
+  }
+  await p.evaluate(() => Game.stopWarp());
+  await wait(p, 1200); await shot('st_arrive');
+  // views at the exoplanets: low orbit of Proxima b, the night side with lights, the surface
+  const views = await p.evaluate(() => {
+    const out = [];
+    const put = (id, alt, ang) => { const A = Game.world.active, b = BODY[id]; A.body = b; const rr = b.R + alt, vv = Math.sqrt(b.mu / rr);
+      A.r = [rr * Math.cos(ang), rr * Math.sin(ang), 0]; A.v = [-vv * Math.sin(ang), vv * Math.cos(ang), 0]; A.throttle = 0; A.rails = null; };
+    put('proxb', 120000, 0.3); setOrigin(sceneSystem()); out.push(BODY.proxb.sys.id + ' ' + (ORIGIN.b && ORIGIN.b.id));
+    return out;
+  });
+  console.log('origin', views.join(' '));
+  await wait(p, 2500); await shot('st_proxb_orbit');
+  await p.evaluate(() => { Game.world.cam.yaw += 2.4; }); await wait(p, 800); await shot('st_proxb_orbit2');
+  await p.evaluate(() => { const A = Game.world.active, b = BODY.trape, rr = b.R + 90000, vv = Math.sqrt(b.mu / rr); A.body = b; A.r = [0, rr, 0]; A.v = [-vv, 0, 0]; A.rails = null; });
+  await wait(p, 2500); await shot('st_trape');
+  await p.evaluate(() => { Game.toggleMap(); MAP.focus = { kind: 'body', id: 'trappist' }; MAP.dist = 3e9; MAP.pitch = 0.6; });
+  await wait(p, 1500); await shot('st_trappist_map');
+  console.log('trappist map sky', await skyPx());
+};
+// Exoplanet close-ups in the map, then standing on Proxima b and TRAPPIST-1 e.
+module.exports.exo = async (p, shot) => {
+  await p.evaluate(() => { Game.newGame('sandbox'); Game.launch(stockDesigns()[0]); });
+  await wait(p, 1200);
+  for (const [id, k] of [['proxb', 3.2], ['proxd', 3.2], ['trape', 3.2], ['trapf', 3.2], ['barnb', 3.2], ['epserib', 3.5], ['acenb', 40]]) {
+    await p.evaluate(([id, k]) => {
+      const A = Game.world.active, b = BODY[id], rr = b.R * 3, vv = Math.sqrt(b.mu / rr);
+      A.lock = null; A.landed = false; A.prelaunch = false; A.prelaunchHold = false; A.body = b; A.r = [rr, 0, 0]; A.v = [0, vv, 0]; A.rails = null;
+      if (!Game.world.map) Game.toggleMap();
+      // look at the lit side: camera between the planet and its star
+      const sd = V.norm(V.sub(bodyAbsPos(b.host, Game.g.ut), bodyAbsPos(b, Game.g.ut)));
+      MAP.focus = { kind: 'body', id }; MAP.dist = b.R * k; MAP.yaw = Math.atan2(sd[1], sd[0]) + 0.6; MAP.pitch = 0.25;
+    }, [id, k]);
+    await wait(p, 2500); await shot('exo_' + id);
+  }
+  // landed on Proxima b, star low over the horizon
+  await p.evaluate(() => {
+    const W = Game.world, A = W.active, b = BODY.proxb, t = Game.g.ut;
+    if (W.map) Game.toggleMap();
+    const sd = V.norm(V.sub(bodyAbsPos(b.host, t), bodyAbsPos(b, t)));
+    const up = V.norm(V.add(V.scale(sd, 0.35), V.scale(V.norm(V.cross(sd, [0, 0, 1])), 0.94)));
+    const gh = groundHeight(b, V.norm(inertialToBodyFixed(b, t, up)), 2);
+    A.body = b; A.r = V.scale(up, b.R + gh + 3); A.v = V.cross(bodyOmega(b), A.r); A.q = Q.fromTo([0, 1, 0], up); A.w = [0, 0, 0]; A.rails = null;
+    W.cam.pitch = 0.12; W.cam.dist = 18; W.cam.yaw = 0;
+  });
+  await wait(p, 4000);
+  for (let i = 0; i < 4; i++) { await p.evaluate((i) => { Game.world.cam.yaw = i * 1.57; }, i); await wait(p, 1200); await shot('exo_surf_proxb_' + i); }
+  console.log(await p.evaluate(() => situationText(Game.world.active, Game.g.ut) + ' | ' + Game.world.active.body.name));
+};
+// Gadgets: a sail probe unfurls its 100 m mirror in orbit; searchlights on a lander at night on the Moon.
+module.exports.gadgets = async (p, shot) => {
+  await p.evaluate(() => {
+    Game.newGame('sandbox');
+    const d = makeDesign('Парусник', ['sail', { id: 'probe_p1', r: [{ sym: 2, y: 0, ang: 0, part: 'rtg' }, { sym: 1, y: 0, ang: 90, part: 'antenna' }] }, 'battery_l']);
+    Game.launch(d);
+    const W = Game.world, A = W.active, E = BODY.earth, rr = E.R + 400000, vv = Math.sqrt(E.mu / rr), t = Game.g.ut;
+    A.lock = null; A.landed = false; A.prelaunch = false; A.prelaunchHold = false;
+    // on the day side, the sail face towards the Sun
+    const sd = V.norm(V.sub(bodyAbsPos(BODY.sun, t), bodyAbsPos(E, t)));
+    A.r = V.scale(sd, rr); A.v = V.scale(V.norm(V.cross([0, 0, 1], sd)), vv); A.q = Q.fromTo([0, 1, 0], sd); A.w = [0, 0, 0];
+    W.cam.dist = 30; W.cam.pitch = 0.5;
+    Game.stage();
+  });
+  await wait(p, 1500); await shot('gd_sail_open');
+  await wait(p, 4000);
+  await p.evaluate(() => { Game.world.cam.dist = 30000; }); await wait(p, 4000); await shot('gd_sail_full');
+  console.log('sail', await p.evaluate(() => { const A = Game.world.active; return `deployed ${sailDeployed(A)} thrust ${(A.sailNow * 1000).toFixed(1)} mN, accel ${(A.sailNow / massProps(A).m * 1e6).toFixed(1)} µm/s²`; }));
+  // under warp the sail keeps pushing (SAS radial-out keeps it facing the Sun on the day side only, so use stability hold)
+  const e0 = await p.evaluate(() => { const A = Game.world.active; A.sas = true; A.sasMode = 'stab'; const el = elFromState(A.r, A.v, A.body.mu, Game.g.ut); return el.a; });
+  await p.evaluate(() => { for (let i = 0; i < 6; i++) Game.warpUp(); });
+  await wait(p, 3000);
+  const e1 = await p.evaluate(() => { const A = Game.world.active; Game.stopWarp(); const el = elFromState(A.r, A.v, A.body.mu, Game.g.ut); return el.a; });
+  console.log('semi-major axis under warp', e0.toFixed(0), '->', e1.toFixed(0));
+  // searchlights on the Moon's night side
+  await p.evaluate(() => {
+    const d = makeDesign('Фонарь', [{ id: 'probe_p1', r: [{ sym: 4, y: 0, ang: 45, part: 'light' }, { sym: 4, y: -0.1, part: 'legs' }] }, 'tank_t1m', 'eng_terrier']);
+    Game.launch(d);
+    const W = Game.world, A = W.active, b = BODY.moon, t = Game.g.ut;
+    const sd = V.norm(V.sub(bodyAbsPos(BODY.sun, t), bodyAbsPos(b, t)));
+    const up = V.norm(inertialToBodyFixed(b, t, V.add(V.scale(sd, -0.9), V.scale(V.norm(V.cross(sd, [0, 0, 1])), 0.44))));
+    placeOnPad(A, t, { body: 'moon', lat: Math.asin(up[2]), lon: Math.atan2(up[1], up[0]) });
+    A.prelaunch = false; A.prelaunchHold = false;
+    W.cam.dist = 22; W.cam.pitch = 0.35;
+  });
+  await wait(p, 4000); await shot('gd_night_off');
+  await p.evaluate(() => Game.toggleLights()); await wait(p, 1500); await shot('gd_night_on');
+  console.log('lights', await p.evaluate(() => RV.spots.map(s => s.intensity).join(',') + ' elec ' + vesselRes(Game.world.active, 'ELEC').toFixed(1) + ' ' + situationText(Game.world.active, Game.g.ut)));
+};
+// README frames: Proxima b from its surface with the red dwarf in the sky, the TRAPPIST-1 system on the map.
+module.exports.starshots = async (p, shot) => {
+  await p.evaluate(() => {
+    Game.newGame('sandbox');
+    Game.launch(makeDesign('Посадочный', ['chute_s', { id: 'pod_k1', r: [{ sym: 2, y: 0, ang: 0, part: 'light' }] }, { id: 'tank_t1l', r: [{ sym: 4, y: -0.2, part: 'legs' }] }, 'eng_terrier']));
+    const W = Game.world, A = W.active, b = BODY.proxb, t = Game.g.ut;
+    const sd = V.norm(V.sub(bodyAbsPos(b.host, t), bodyAbsPos(b, t)));
+    const side = V.norm(V.cross(sd, [0, 0, 1]));
+    const up = V.norm(inertialToBodyFixed(b, t, V.add(V.scale(sd, 0.26), V.scale(side, 0.97))));   // the star ~15° above the horizon
+    placeOnPad(A, t, { body: 'proxb', lat: Math.asin(up[2]), lon: Math.atan2(up[1], up[0]) });
+    A.prelaunch = false; A.prelaunchHold = false;
+    Game.toggleLegs();
+    const upI = V.norm(A.r);
+    // camera low, looking towards the star past the lander
+    const north = V.norm(V.reject([0, 0, 1], upI)), east = V.cross(north, upI);
+    const toStar = V.norm(V.reject(sd, upI));
+    W.cam.yaw = Math.atan2(-V.dot(toStar, east), V.dot(toStar, north)); W.cam.pitch = 0.05; W.cam.dist = 16;
+  });
+  await wait(p, 9000); await shot('rd_proxima');
+  await p.evaluate(() => {
+    const A = Game.world.active, b = BODY.trape, rr = b.R + 150000, vv = Math.sqrt(b.mu / rr);
+    A.body = b; A.r = [rr, 0, 0]; A.v = [0, vv, 0]; A.rails = null; A.lock = null; A.landed = false;
+    Game.toggleMap(); MAP.focus = { kind: 'body', id: 'trappist' }; MAP.dist = 2.4e9; MAP.pitch = 0.55; MAP.yaw = 0.9;
+  });
+  await wait(p, 8000); await shot('rd_trappist');
+};
+// Science-fiction mode: map of the new objects, a wormhole, the sky at 0.9c, warp, Sagittarius A*.
+module.exports.scifi = async (p, shot) => {
+  await p.evaluate(() => { Game.newGame('sandbox', { scifi: true }); });
+  await wait(p, 800);
+  console.log('mode', await p.evaluate(() => `scifi ${SCIFI.on}, bodies ${BODIES.length}, parts in catalogue ${PARTS.filter(x => !x.hidden && (!x.scifi || SCIFI.on)).length}`));
+  // a ship parked 3 km from «Ариадна» at Earth's L4, looking at the throat
+  await p.evaluate(() => {
+    const d = makeDesign('Пилигрим', [{ id: 'pod_k3', r: [{ sym: 2, y: 0, ang: 0, part: 'light' }] }, 'reactor', 'reactor', 'tank_exotic', 'warp_core', 'tank_am', 'eng_photon']);
+    Game.launch(d);
+    const W = Game.world, A = W.active, b = BODY.wh_ariadne;
+    A.lock = null; A.landed = false; A.prelaunch = false; A.prelaunchHold = false;
+    A.body = b; A.r = [b.R * 4, 0, b.R * 0.6]; A.v = [0, 0, 0]; A.q = Q.fromTo([0, 1, 0], V.norm(V.neg(A.r))); A.w = [0, 0, 0];
+    W.cam.pitch = 0.08; W.cam.yaw = Math.PI / 2; W.cam.dist = 45;
+  });
+  await wait(p, 2500); await shot('sf_wormhole');
+  // fly in: the other mouth is at TRAPPIST-1
+  await p.evaluate(() => { const A = Game.world.active; A.v = V.scale(V.norm(V.neg(A.r)), 600); });
+  for (let i = 0; i < 30; i++) { const b = await p.evaluate(() => Game.world.active.body.id); if (b !== 'wh_ariadne') break; await wait(p, 300); }
+  console.log('after the throat:', await p.evaluate(() => `${Game.world.active.body.name} · origin ${ORIGIN.b && ORIGIN.b.id}`));
+  await wait(p, 1500); await shot('sf_trappist_side');
+  // the sky at 0.9c, looking ahead
+  await p.evaluate(() => { const A = Game.world.active, b = BODY.trappist; A.body = b; A.r = [3e12, 0, 0]; A.v = [0, 0.9 * C_LIGHT, 0]; A.q = Q.fromTo([0, 1, 0], [0, 1, 0]); A.rails = null; Game.world.cam.pitch = 0.05; Game.world.cam.yaw = Math.PI; });
+  await wait(p, 1500); await shot('sf_09c_ahead');
+  await p.evaluate(() => { Game.world.cam.yaw = 0; }); await wait(p, 800); await shot('sf_09c_behind');
+  // warp from TRAPPIST-1 towards the Sun at 10 000c
+  const w = await p.evaluate(() => {
+    const W = Game.world, A = W.active; A.v = [0, 0, 0]; A.r = [3e12, 0, 0];
+    W.target = 'sun'; A.sas = true; A.sasMode = 'target'; A.warpF = 10000;
+    renderFlight(0.016);   // sets the target direction
+    A.q = Q.fromTo([0, 1, 0], A.targetDir);
+    Game.toggleWarpDrive();
+    return `warp ${A.warpOn} at ${A.warpF}c`;
+  });
+  console.log(w);
+  await wait(p, 1500); await shot('sf_warp');
+  for (let i = 0; i < 40; i++) { const s = await p.evaluate(() => Game.world.active.warpOn); if (!s) break; await p.evaluate(() => { if (Game.world.warp < 6) Game.warpUp(); }); await wait(p, 500); }
+  console.log('warp result:', await p.evaluate(() => { const A = Game.world.active; return `${A.body.name}, ${fmtDist(V.len(A.r))} from it, exotic ${vesselRes(A, 'EXOTIC').toFixed(2)} t, ${fmtDate(Game.g.ut)}`; }));
+  // the map, zoomed out to the whole Galaxy
+  await p.evaluate(() => { Game.toggleMap(); MAP.focus = { kind: 'body', id: 'sun' }; MAP.dist = 3e20; MAP.pitch = 0.6; });
+  await wait(p, 1500); await shot('sf_map_galaxy');
+  await p.evaluate(() => Game.toggleMap());
+  // Sagittarius A* from 20 Rs, ship between the camera and the hole
+  await p.evaluate(() => { const W = Game.world, A = W.active, b = BODY.sgra; A.warpOn = false; A.body = b; A.r = [b.R * 20, 0, b.R * 2]; A.v = [0, Math.sqrt(b.mu / (b.R * 20)), 0]; A.rails = null; A.q = Q.fromTo([0, 1, 0], V.norm(V.neg(A.r))); W.cam.pitch = 0.12; W.cam.yaw = Math.PI / 2; W.cam.dist = 60; });
+  await wait(p, 2500); await shot('sf_sgra');
+  console.log('at Sgr A*:', await p.evaluate(() => situationText(Game.world.active, Game.g.ut)));
+};
+// Science fiction, part 2: a shipyard base launches a ship beside itself; Island Three; Prometheus' ring and swarm.
+module.exports.scifi2 = async (p, shot) => {
+  await p.evaluate(() => { Game.newGame('sandbox', { scifi: true }); });
+  await wait(p, 800);
+  // a shipyard parked in low Moon orbit, saved, then a new ship rolled out of it from the assembly hall
+  await p.evaluate(() => {
+    Game.launch(stockDesigns().find(d => d.name === 'Звёздный док'));
+    const W = Game.world, A = W.active, b = BODY.moon, rr = b.R + 60000;
+    A.lock = null; A.landed = false; A.prelaunch = false; A.prelaunchHold = false; A.body = b; A.r = [rr, 0, 0]; A.v = [0, Math.sqrt(b.mu / rr), 0]; A.rails = null;
+    A.parts = A.parts.filter(() => true);
+    Game.persistWorld ? Game.persistWorld() : null;
+  });
+  await wait(p, 600);
+  const r = await p.evaluate(() => {
+    if (typeof persistWorld === 'function') persistWorld();
+    const yards = shipyards(Game.g);
+    const d = stockDesigns().find(x => x.name === 'Пилигрим'); d.site = 'yard:' + yards[0].id;
+    Game.launch(d);
+    const W = Game.world, A = W.active, Y = W.vessels.find(v => v.id === yards[0].id);
+    return `yards ${yards.length}; new ship at ${A.body.name}, ${V.dist(A.r, Y.r).toFixed(0)} m from «${Y.name}», same speed ${V.dist(A.v, Y.v).toFixed(2)} m/s`;
+  });
+  console.log(r);
+  await p.evaluate(() => { const W = Game.world; W.cam.dist = 140; W.cam.pitch = 0.3; W.cam.yaw = 2.2; });
+  await wait(p, 2500); await shot('sf_yard');
+  // Island Three: rendezvous view from 6 km
+  await p.evaluate(() => {
+    const W = Game.world, A = W.active, b = BODY.island3, t = Game.g.ut, hd = V.norm(V.sub(bodyAbsPos(b.host, t), bodyAbsPos(b, t)));
+    // on the sunlit flank, 6 km out, a little sunward
+    A.body = b; A.r = V.add(V.scale(hd, 2500), V.scale(V.norm(V.cross(hd, [0, 0, 1])), 5500)); A.v = [0, 0, 0]; A.rails = null; A.q = Q.fromTo([0, 1, 0], V.norm(V.neg(A.r)));
+    W.cam.dist = 40; W.cam.pitch = 0.05; W.cam.yaw = 1.3;
+    const look = V.norm(V.neg(A.r));
+    window.flightCamera = () => { const cam = V.add(bodyAbsPos(A.body, Game.g.ut), V.add(A.r, V.scale(look, -60))); return { camAbs: cam, quat: lookQuat(look, [0, 0, 1]), up: [0, 0, 1] }; };
+  });
+  await wait(p, 2500); await shot('sf_island3');
+  // Prometheus: the ring and the swarm from 1.6 AU above the ring plane
+  await p.evaluate(() => {
+    const W = Game.world, A = W.active, b = BODY.prometheus, R = AU * SCALE_L;
+    A.body = b; A.r = [R * 0.9, -R * 0.9, R * 0.9]; A.v = [0, 0, 0]; A.rails = null;
+    const look = V.norm(V.neg(A.r));
+    window.flightCamera = () => { const cam = V.add(bodyAbsPos(A.body, Game.g.ut), V.add(A.r, V.scale(look, -60))); return { camAbs: cam, quat: lookQuat(look, [0, 0, 1]), up: [0, 0, 1] }; };
+    RV.fov = 60;
+  });
+  await wait(p, 3000); await shot('sf_prometheus');
+  console.log('prometheus:', await p.evaluate(() => `light at the ship ${starLight(V.add(bodyAbsPos(BODY.prometheus, Game.g.ut), Game.world.active.r), Game.g.ut).fMain.toFixed(3)} of the Sun at Earth`));
+};

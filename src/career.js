@@ -8,7 +8,7 @@ function newGame(mode, name, opts) {
   opts = opts || {};
   const g = {
     v: SAVE_VERSION, mode, name: name || (opts.race ? 'Космическая гонка' : mode === 'career' ? 'Карьера' : 'Песочница'), created: Date.now(),
-    ut: opts.start != null ? kscMorning(opts.start) : 0, race: opts.race ? { items: {} } : null, builds: [],
+    ut: opts.start != null ? kscMorning(opts.start) : 0, race: opts.race ? { items: {} } : null, builds: [], scifi: !!opts.scifi,
     funds: 25000, science: 0, rep: 0,
     techs: mode === 'career' ? ['start'] : TECH.map(t => t.id),
     subjects: {}, milestones: {}, records: { alt: 0 },
@@ -23,7 +23,7 @@ const isCareer = (g) => g.mode === 'career';
 // first moment after t when the sun is ~15 degrees up over the space centre (a morning start)
 function kscMorning(t) {
   const E = BODY.earth, up0 = V.norm(surfacePoint(E, KSC.lat, KSC.lon, 0));
-  const elev = (tt) => V.dot(bodyFixedToInertial(E, tt, up0), V.norm(V.neg(bodyAbsPos(E, tt))));
+  const elev = (tt) => V.dot(bodyFixedToInertial(E, tt, up0), V.norm(V.sub(bodyAbsPos(BODY.sun, tt), bodyAbsPos(E, tt))));
   for (let k = 0; k <= 400; k++) { const tt = t + E.rotPeriod * k / 400, a = elev(tt), b = elev(tt + E.rotPeriod / 400); if (a < 0.26 && b >= 0.26) return tt; }
   return t;
 }
@@ -81,8 +81,37 @@ function crewHome(g, id) {
   let gain = 0;
   for (const b in c.log) for (const k in c.log[b]) if (c.log[b][k] === 1) { gain += xpFor(b, k); c.log[b][k] = 2; }
   const lv = crewLevel(c);
-  c.xp += gain; c.flights++; c.status = 'ready'; c.vessel = null;
+  c.xp += gain; c.flights++; c.status = 'ready'; c.vessel = null; c.t = null;
   return { gain, up: crewLevel(c) > lv };
+}
+// ---- ageing: a century between the stars is a lifetime; a powered cryo pod slows it a hundredfold ----
+function crewAge(c) { return (c.age0 || 30) + (c.flown || 0) / (365.25 * DAY); }
+function crewLifespan(c) { return 82 + (parseInt(c.id.slice(1), 10) * 7919) % 13; }   // 82–94 years
+function cryoPowered(v, ut) {
+  let need = 0;
+  for (const p of v.parts) if (!p.dead && PART[p.id].cryo && p.crew && p.crew.length) need += PART[p.id].cryo.elec;
+  if (!need) return false;
+  return elecRates(v, ut, false).gen >= need || (!v.rails && vesselRes(v, 'ELEC') > 0.01);
+}
+// biological time of everyone aboard; returns who died of old age (career only: in the sandbox nobody dies)
+function crewAgeTick(g, vessels, ut) {
+  const out = [];
+  for (const v of vessels) {
+    if (v.destroyed) continue;
+    // moving clocks run slow, and so do clocks deep in a black hole's well
+    const cryo = cryoPowered(v, ut), slow = SCIFI.on ? (v.body.bh ? Math.sqrt(Math.max(1 - v.body.R / V.len(v.r), 1e-6)) : 1) / lorentz(v.v) : 1;
+    for (const p of v.parts) {
+      if (p.dead || !p.crew || !p.crew.length) continue;
+      const rate = (cryo && PART[p.id].cryo ? 0.01 : 1) * slow;
+      for (const id of p.crew.slice()) {
+        const c = crewById(g, id); if (!c) continue;
+        if (c.t != null && ut > c.t) c.flown = (c.flown || 0) + (ut - c.t) * rate;
+        c.t = ut; c.cryo = cryo && !!PART[p.id].cryo;
+        if (isCareer(g) && crewAge(c) > crewLifespan(c)) { p.crew.splice(p.crew.indexOf(id), 1); c.status = 'kia'; c.old = true; c.vessel = null; g.rep -= 2; out.push(c); }
+      }
+    }
+  }
+  return out;
 }
 function crewLost(g, id) {
   const c = crewById(g, id); if (!c) return;
@@ -103,7 +132,7 @@ function assignCrew(g, v, design) {
       p.crew.push(ready.splice(i, 1)[0].id);
     }
   }
-  for (const id of crewOf(v)) { const c = crewById(g, id); c.status = 'flight'; c.vessel = v.id; }
+  for (const id of crewOf(v)) { const c = crewById(g, id); c.status = 'flight'; c.vessel = v.id; c.t = g.ut; }
 }
 // best pilot level aboard; null = no restriction (sandbox, probe core, or a pre-crew save)
 function sasLevel(g, v) {
@@ -241,6 +270,7 @@ function milestoneDef(id) {
     space: ['Первый выход в космос', 9000, 6, 5], orbit_earth: ['Первая орбита Земли', 15000, 10, 8],
     return_orbit: ['Возвращение с орбиты', 10000, 8, 6], escape_earth: ['Покинуть сферу Земли', 18000, 12, 8],
     dock: ['Первая стыковка', 20000, 12, 10], eva: ['Первый выход в открытый космос', 15000, 10, 8],
+    interstellar: ['Межзвёздное пространство', 120000, 60, 30],
   };
   if (fixed[id]) return fixed[id];
   if (id === 'station') return ['Орбитальная станция', 30000, 15, 12];
@@ -266,6 +296,10 @@ function milestone(g, id) {
 // called ~1 Hz by the flight scene; returns newly reached milestones
 function progressTick(g, v, ut) {
   const out = [];
+  if (v.body.void) {   // open space: only the heliopause milestone can happen here
+    if (v.body.parent.id === 'sun' && voidStarDist(v) > 120 * AU * SCALE_L) out.push(milestone(g, 'interstellar'));
+    return out.filter(Boolean);
+  }
   const b = v.body, alt = V.len(v.r) - b.R;
   const fb = v.flags.bodies || (v.flags.bodies = {});
   const f = fb[b.id] || (fb[b.id] = {});
@@ -276,6 +310,8 @@ function progressTick(g, v, ut) {
     for (const [k, h] of [['alt_5k', 5e3], ['alt_10k', 1e4], ['alt_20k', 2e4], ['alt_40k', 4e4]]) if (alt > h) out.push(milestone(g, k));
     if (alt > b.atm.top) out.push(milestone(g, 'space'));
   } else if (BODY.earth && !isDescendant(b, BODY.earth)) out.push(milestone(g, 'escape_earth'));
+  // past the heliopause (~120 AU, scaled)
+  if (b.id === 'sun' && V.len(v.r) > 120 * AU * SCALE_L) out.push(milestone(g, 'interstellar'));
   const el = elFromState(v.r, v.v, b.mu, ut);
   const safe = b.R + (b.atm ? b.atm.top : Math.min(10000, b.R * 0.05));
   if (el.e < 1 && el.rp > safe && el.ra < b.soi && !v.landed) { f.orbit = true; out.push(milestone(g, 'orbit_' + b.id)); }
@@ -325,7 +361,7 @@ function makeContract(g, rnd) {
     if (g.techs.includes('docking')) types.push('dock');
   }
   const type = pick(types);
-  const solid = (x) => !x.gas && x.vis.type !== 'star';
+  const solid = (x) => !x.gas && !['star', 'blackhole', 'wormhole', 'mega'].includes(x.vis.type);
   let b = pick(bodies.filter(x => type === 'land' || type === 'return' || type === 'flag' ? solid(x) && x.id !== 'earth' : type === 'rescue' ? x.id === 'earth' || x.id === 'moon' : type === 'dock' ? solid(x) : true));
   if (!b) b = BODY.earth;
   if ((type === 'flyby' || type === 'land' || type === 'return') && b.id === 'earth') b = bodies.find(x => x.id === 'moon') || BODY.moon;
@@ -503,7 +539,7 @@ function removeAlarm(g, id) { g.alarms = (g.alarms || []).filter(a => a.id !== i
 // ---- vessel (de)serialization ----
 function serializeVessel(v) {
   return {
-    id: v.id, name: v.name, body: v.body.id, r: v.r, v: v.v, q: v.q, w: v.w || [0, 0, 0], lock: v.lock || null,
+    id: v.id, name: v.name, body: v.body.void ? v.body.parent.id : v.body.id, r: v.body.void ? V.add(v.r, v.body.el.r0) : v.r, v: v.v, q: v.q, w: v.w || [0, 0, 0], lock: v.lock || null,
     landed: !!v.landed, prelaunch: !!v.prelaunch, parts: v.parts.map(p => ({
       id: p.id, uid: p.uid, k: p.k, pos: p.pos, dir: p.dir, ang: p.ang, role: p.role, res: p.res, T: p.T, st: p.st, data: p.data,
       dead: !!p.dead, pEdge: p.pEdge, q: p.q || undefined, portDir: p.portDir, origName: p.origName, crew: p.crew,

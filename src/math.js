@@ -91,9 +91,14 @@ function fmtDist(m) {
   if (a < 1e4) return m.toFixed(0) + ' м';
   if (a < 1e7) return (m / 1e3).toFixed(a < 1e5 ? 2 : 1) + ' км';
   if (a < 1e10) return (m / 1e6).toFixed(2) + ' Мм';
-  return (m / 1e9).toFixed(2) + ' Гм';
+  if (a < 1e13) return (m / 1e9).toFixed(2) + ' Гм';
+  if (a < 1e14) return (m / 1e12).toFixed(2) + ' Тм';
+  const ly = m / 9.4607e14;             // a light-year of the 1:10 world (see LY in bodies.js)
+  return (Math.abs(ly) < 10 ? ly.toFixed(3) : Math.abs(ly) < 1e5 ? ly.toFixed(1) : Math.abs(ly) < 1e6 ? (ly / 1e3).toFixed(1) + ' тыс.' : (ly / 1e6).toFixed(2) + ' млн') + ' св. г.';
 }
-function fmtSpeed(v) { return Math.abs(v) < 1e4 ? v.toFixed(1) + ' м/с' : (v / 1e3).toFixed(2) + ' км/с'; }
+// whole years with the Russian plural: 21 год, 23 года, 25 лет
+function fmtYears(y) { const n = Math.floor(y), a = n % 10, b = n % 100; return n + (a === 1 && b !== 11 ? ' год' : a >= 2 && a <= 4 && (b < 12 || b > 14) ? ' года' : ' лет'); }
+function fmtSpeed(v) { return Math.abs(v) < 1e4 ? v.toFixed(1) + ' м/с' : Math.abs(v) < 0.01 * C_LIGHT ? (v / 1e3).toFixed(2) + ' км/с' : (v / C_LIGHT).toFixed(4) + ' c'; }
 // Game calendar: 1 day = scaled Earth solar day (see bodies.js DAY)
 function fmtDur(s, short) {
   if (!isFinite(s)) return '—';

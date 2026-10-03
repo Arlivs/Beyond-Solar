@@ -10,7 +10,7 @@ const PATCH_COLORS = [0x5ae2ff, 0xffb13a, 0xe07bff, 0x8dff7b, 0xff7b98, 0xfff27b
 
 function initMap(layer) {
   MAP.layer = layer;
-  for (const b of BODIES) {
+  for (const b of ALL_BODIES) {
     if (!b.parent) continue;
     const pts = [];
     for (let i = 0; i <= 360; i++) pts.push(toT(elPosAtNu(b.el, i / 360 * TAU)));
@@ -78,10 +78,11 @@ function mapCameraQuat(look) {
   return new THREE.Quaternion().setFromRotationMatrix(m);
 }
 
-// screen projection of a camera-relative three vector
+// screen projection of a camera-relative three vector (anything in front of the camera, however far)
 function projectT(vT) {
+  const e = RV.camera.matrixWorldInverse.elements;
+  if (e[2] * vT.x + e[6] * vT.y + e[10] * vT.z + e[14] > -RV.camera.near) return null;
   const p = vT.clone().project(RV.camera);
-  if (p.z > 1 || p.z < -1) return null;
   return [(p.x + 1) / 2 * RV.w, (1 - p.y) / 2 * RV.h];
 }
 function projectAbs(abs) { return projectT(relT(abs)); }
@@ -108,22 +109,30 @@ function mapUpdate(t, vessel, traj, hooks) {
   MAP._frame = (MAP._frame || 0) + 1;
   // body orbit lines
   const focusB = mapFocusBody(vessel);
-  for (const b of BODIES) {
+  for (const b of ALL_BODIES) {
     if (!b.parent) continue;
     const line = MAP.bodyLines[b.id];
+    if (!b.active) { line.visible = false; continue; }
     relT(bodyAbsPos(b.parent, t), line.position);
-    // show moon orbits only near their parent
+    // show moon orbits only near their parent; stars around the Sun are effectively at rest
     const camD = V.dist(RV.camAbs, bodyAbsPos(b.parent, t));
-    line.visible = b.parent.id === 'sun' || camD < b.parent.soi * 6 || b.parent === focusB || b === focusB;
+    line.visible = !(b.star && b.parent.id === 'sun') && (b.parent.id === 'sun' || camD < b.parent.soi * 6 || b.parent === focusB || b === focusB);
   }
   // body markers
   for (const b of BODIES) {
     const abs = bodyAbsPos(b, t);
     const xy = projectAbs(abs);
-    const camD = V.dist(RV.camAbs, abs);
-    const show = b.parent == null || b.parent.id === 'sun' || camD < b.parent.soi * 4 || b.parent === focusB;
+    const camD = V.dist(RV.camAbs, abs), pD = b.parent ? V.dist(RV.camAbs, bodyAbsPos(b.parent, t)) : 0;
+    // stars are beacons from anywhere; planets show inside their own system, moons near their planet
+    const show = b.parent == null || b.parent === focusB || (b.star || b.bh ? b.parent.id === 'sun' || pD < b.el.a * 30 :
+      b.parent.star ? pD < 1e14 : camD < b.parent.soi * 4);
     mapLabel('b_' + b.id, `<i style="background:${b.vis.c[0]}"></i><span>${b.name}</span>`, show ? xy : null, 'body' + (hooks.target === b.id ? ' target' : ''),
       () => hooks.focusBody(b.id));
+  }
+  // galaxies and the quasar (science fiction): beacons on the map at their true places
+  if (SCIFI.on) {
+    const sunAbs = bodyAbsPos(BODY.sun, t), camSun = V.sub(RV.camAbs, sunAbs);
+    for (const G of GALAXIES) mapLabel('g_' + G.id, `<i style="background:#c8b8ff"></i><span>${G.name}</span>`, V.dist(camSun, G.pos) > G.R * 1.15 ? projectAbs(V.add(sunAbs, G.pos)) : null, 'body');
   }
   // vessel trajectory
   MAP.samples = [];
@@ -218,6 +227,7 @@ function mapUpdate(t, vessel, traj, hooks) {
 // sample patch at n+1 points with times (true-anomaly spacing)
 function samplePatchTimed(pt, n) {
   const el = pt.el, out = [];
+  if (el.lin) { const t1 = isFinite(pt.t1) ? pt.t1 : pt.t0 + 1e9; for (let i = 0; i <= n; i++) { const tt = pt.t0 + (t1 - pt.t0) * i / n; out.push({ r: elState(el, tt).r, t: tt }); } return out; }
   let nu0 = elNuAt(el, pt.t0), nu1;
   const full = el.e < 1 && (pt.t1 - pt.t0 >= el.T * 0.999);
   if (full) nu1 = nu0 + TAU;

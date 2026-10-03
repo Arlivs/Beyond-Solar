@@ -7,9 +7,10 @@ const CATS = [
   ['aero', 'Аэродинамика'], ['wheels', 'Колёса'], ['utility', 'Оборудование'], ['science', 'Наука'],
 ];
 
-const RES_NAMES = { LFO: 'Топливо', SOLID: 'Твёрдое', MONO: 'Монотопливо', ELEC: 'Электричество', XENON: 'Ксенон', ABLATOR: 'Абляция' };
+const RES_NAMES = { LFO: 'Топливо', SOLID: 'Твёрдое', MONO: 'Монотопливо', ELEC: 'Электричество', XENON: 'Ксенон', ABLATOR: 'Абляция',
+  FUSION: 'Дейтерий-гелий-3', ANTIMAT: 'Антиматерия', EXOTIC: 'Экзотическая материя' };
 // price per tonne of each resource (funds)
-const RES_COST = { LFO: 160, SOLID: 120, MONO: 1200, ELEC: 0, XENON: 40000, ABLATOR: 500 };
+const RES_COST = { LFO: 160, SOLID: 120, MONO: 1200, ELEC: 0, XENON: 40000, ABLATOR: 500, FUSION: 6000, ANTIMAT: 60000, EXOTIC: 200000 };
 
 const P = [];
 function part(o) { P.push(o); }
@@ -24,6 +25,9 @@ part({ id: 'pod_k3', name: 'Капсула К-3', cat: 'pod', tech: 'command_mod
 part({ id: 'pod_cockpit', name: 'Кабина «Стриж»', cat: 'pod', tech: 'aviation', cost: 1600, mass: 1.0, attach: 'stack', shape: 'cockpit',
   dTop: 0, dBot: 1.25, h: 2.0, res: { ELEC: 60, MONO: 0.02 }, command: { crew: 1, torque: 4 }, maxTemp: 1900, crash: 16, nose: 0.12,
   desc: 'Обтекаемая одноместная кабина для самолётов и космопланов. Ставится носом вверх по стеку.' });
+part({ id: 'cryo', name: 'Криокапсула КС-4', cat: 'pod', tech: 'cryonics', cost: 48000, mass: 3.2, attach: 'stack', shape: 'cryo',
+  dTop: 2.5, dBot: 2.5, h: 2.4, res: { ELEC: 50 }, command: { crew: 4, torque: 0 }, cryo: { elec: 1.5 }, maxTemp: 1800, crash: 10,
+  desc: 'Четыре места в гибернации: пока есть ток (1.5 эл/с; между звёздами — от РИТЭГа или реактора), экипаж стареет в 100 раз медленнее. Спящие кораблём не управляют.' });
 part({ id: 'probe_p0', name: 'Зонд ПЗ-0', cat: 'pod', tech: 'flight_control', cost: 450, mass: 0.08, attach: 'stack', shape: 'probe',
   dTop: 0.625, dBot: 0.625, h: 0.35, res: { ELEC: 10 }, command: { crew: 0, torque: 0.5, elecUse: 0.02 }, maxTemp: 1200, crash: 8,
   desc: 'Беспилотное управление. Требует электричество.' });
@@ -51,6 +55,12 @@ part({ id: 'mono_r', name: 'Радиальный бак М-0', cat: 'tank', tech
   h: 0.5, w: 0.3, depth: 0.3, res: { MONO: 0.12 }, maxTemp: 2000, crash: 8, desc: 'Малый радиальный бак монотоплива.' });
 part({ id: 'xenon_r', name: 'Ксеноновый бак КР-1', cat: 'tank', tech: 'ion', cost: 2500, mass: 0.054, attach: 'radial', shape: 'xenonRadial',
   h: 0.6, w: 0.35, depth: 0.35, res: { XENON: 0.072 }, maxTemp: 2000, crash: 6, desc: 'Ксенон для ионного двигателя.' });
+part({ id: 'tank_he3', name: 'Криобак Г-12', cat: 'tank', tech: 'fusion', cost: 26000, mass: 2.4, attach: 'stack', shape: 'cryoTank',
+  dTop: 2.5, dBot: 2.5, h: 3.4, res: { FUSION: 12 }, maxTemp: 2000, crash: 6, desc: 'Дейтерий и гелий-3 для термоядерного двигателя, 12 т.' });
+part({ id: 'tank_he3_l', name: 'Криобак Г-48', cat: 'tank', tech: 'fusion', cost: 82000, mass: 8, attach: 'stack', shape: 'cryoTank',
+  dTop: 3.75, dBot: 3.75, h: 6.2, res: { FUSION: 48 }, maxTemp: 2000, crash: 6, desc: 'Большой криобак: 48 т термоядерного топлива.' });
+part({ id: 'tank_am', name: 'Магнитная ловушка А-20', cat: 'tank', tech: 'antimatter', cost: 140000, mass: 9, attach: 'stack', shape: 'amTrap',
+  dTop: 3.75, dBot: 3.75, h: 3.0, res: { ANTIMAT: 20 }, maxTemp: 2000, crash: 5, desc: 'Антиводород в магнитной ловушке вместе с рабочим телом, 20 т.' });
 part({ id: 'xenon_s', name: 'Ксеноновый бак КС-1', cat: 'tank', tech: 'ion', cost: 2200, mass: 0.054, attach: 'stack', shape: 'xenonTank',
   dTop: 0.625, dBot: 0.625, h: 0.6, res: { XENON: 0.07 }, maxTemp: 2000, crash: 6, desc: 'Ксенон, стековый 0.625 м.' });
 
@@ -76,6 +86,32 @@ eng('jet_turbo', 'ТРД «Вихрь»', 'supersonic', 1.25, 2.4, 2.1, 130, 260
   desc: 'Турбореактивный с форсажем, 130 кН, до ~5.5 М: разгоняет космоплан почти до орбитальной скорости.' });
 eng('eng_ion', 'ИД «Ион»', 'ion', 0.625, 0.4, 0.25, 2, 100, 4200, 0, 8000, { shape: 'ion',
   engine: { thrust: 2, ispSL: 100, ispVac: 4200, prop: 'XENON', gimbal: 0, throttle: true, elec: 8.74 }, desc: 'Тяга 2 кН, УИ 4200 с. Ксенон + 8.7 эл/с.' });
+
+// interstellar drives: huge exhaust velocity, useless in an atmosphere; long burns continue under time warp
+eng('eng_fusion', 'ТЯРД «Дедал»', 'fusion', 2.5, 4.6, 14, 400, 900, 100000, 0.5, 450000, { shape: 'fusion', bell: 0.95,
+  engine: { thrust: 400, ispSL: 900, ispVac: 100000, prop: 'FUSION', gimbal: 0.5, throttle: true, elec: 4 },
+  desc: 'Импульсный термоядерный двигатель: 400 кН, УИ 100 000 с (сотни км/с Δv). Нужен ток 4 эл/с на поджиг. Для межзвёздных перелётов.' });
+eng('eng_am', 'Аннигиляционный «Луч»', 'antimatter', 3.75, 6.5, 32, 600, 2000, 1000000, 0.3, 1600000, { shape: 'antimatter', bell: 1.0,
+  engine: { thrust: 600, ispSL: 2000, ispVac: 1000000, prop: 'ANTIMAT', gimbal: 0.3, throttle: true, elec: 20 },
+  desc: 'Аннигиляция антиводорода с рабочим телом: 600 кН, УИ 1 000 000 с — тысячи км/с. Ток 20 эл/с на магнитное сопло.' });
+
+// ---- science-fiction mode only (scifi: true) ----
+eng('eng_photon', 'Фотонный двигатель «Свет»', 'photon', 3.75, 7.5, 40, 300, C_LIGHT / G0, C_LIGHT / G0, 0.2, 4200000, { shape: 'photon', bell: 1.0, scifi: true,
+  engine: { thrust: 300, ispSL: C_LIGHT / G0, ispVac: C_LIGHT / G0, prop: 'ANTIMAT', gimbal: 0.2, throttle: true, elec: 40 },
+  desc: 'Аннигиляция прямо в свет: скорость истечения равна скорости света. Разгон до 0.9c и выше — дальше работает теория относительности: время на борту замедляется.' });
+part({ id: 'tank_exotic', name: 'Ловушка экзотической материи', cat: 'tank', tech: 'warp', cost: 900000, mass: 7, attach: 'stack', shape: 'exoticTank', scifi: true,
+  dTop: 3.75, dBot: 3.75, h: 3.2, res: { EXOTIC: 10 }, maxTemp: 2000, crash: 5, desc: 'Материя с отрицательной плотностью энергии — топливо варп-пузыря, 10 т.' });
+part({ id: 'warp_core', name: 'Варп-ядро «Алькубьерре»', cat: 'engine', tech: 'warp', cost: 6500000, mass: 26, attach: 'stack', shape: 'warpCore', scifi: true,
+  dTop: 3.75, dBot: 3.75, h: 4.4, warp: { max: 100000, k: 5e-11, elec: 60 }, maxTemp: 2400, crash: 6,
+  desc: 'Сжимает пространство впереди и растягивает позади: корабль покоится в пузыре, а пузырь летит до 100 000c. Только вдали от планет и звёзд, ток 60 эл/с. Экзотической материи на световой год уходит тем больше, чем быстрее: 0.005 т при 10c, 0.5 т при 1000c.' });
+part({ id: 'shipyard', name: 'Орбитальная верфь «Звёздный док»', cat: 'utility', tech: 'bases', cost: 2400000, mass: 60, attach: 'stack', shape: 'shipyard', scifi: true,
+  dTop: 3.75, dBot: 3.75, h: 9, res: { ELEC: 4000 }, yard: true, maxTemp: 2000, crash: 8,
+  desc: 'Космическая база: когда верфь на орбите или на поверхности где угодно, в сборочном цехе можно выбрать «Старт: верфь» — новый корабль появится рядом с ней.' });
+part({ id: 'exotic_synth', name: 'Синтезатор экзотики', cat: 'utility', tech: 'bases', cost: 3800000, mass: 18, attach: 'stack', shape: 'synth', scifi: true,
+  dTop: 3.75, dBot: 3.75, h: 4, synth: { elec: 120, rate: 2e-5 }, maxTemp: 2000, crash: 8,
+  desc: 'Из энергии реакторов — экзотическая материя в ловушки корабля: 0.07 т в час при 120 эл/с. Работает и под ускорением времени, пока хватает генераторов (батареи не в счёт).' });
+part({ id: 'tank_exotic_l', name: 'Большая ловушка экзотики', cat: 'tank', tech: 'warp', cost: 3200000, mass: 22, attach: 'stack', shape: 'exoticTank', scifi: true,
+  dTop: 3.75, dBot: 3.75, h: 9, res: { EXOTIC: 40 }, maxTemp: 2000, crash: 5, desc: '40 т экзотической материи для дальних прыжков.' });
 
 // ---- solid boosters ----
 const srb = (id, name, tech, d, h, dry, solid, thrust, ispSL, ispVac, cost) => part({ id, name, cat: 'engine', tech, cost, mass: dry, attach: 'stack',
@@ -153,6 +189,16 @@ part({ id: 'solar_s', name: 'Солнечная панель СП-1', cat: 'util
   h: 0.5, w: 0.5, depth: 0.05, solar: { rate: 0.35 }, maxTemp: 1200, crash: 6, desc: '0.35 эл/с на орбите Земли.' });
 part({ id: 'solar_l', name: 'Раскладная панель СП-6', cat: 'utility', tech: 'adv_electrics', cost: 380, mass: 0.025, attach: 'radial', shape: 'solarBig',
   h: 0.7, w: 0.3, depth: 0.1, solar: { rate: 1.64 }, maxTemp: 1200, crash: 6, desc: '1.64 эл/с на орбите Земли.' });
+part({ id: 'rtg', name: 'РИТЭГ «Вега»', cat: 'utility', tech: 'nuclear_power', cost: 23000, mass: 0.08, attach: 'radial', shape: 'rtg',
+  h: 0.7, w: 0.3, depth: 0.3, gen: 0.75, maxTemp: 1500, crash: 9, desc: 'Радиоизотопный генератор: 0.75 эл/с всегда — и в тени, и между звёздами.' });
+part({ id: 'reactor', name: 'Реактор РК-30', cat: 'utility', tech: 'nuclear_power', cost: 62000, mass: 4, attach: 'stack', shape: 'reactor',
+  dTop: 2.5, dBot: 2.5, h: 1.9, gen: 30, maxTemp: 1800, crash: 7, desc: 'Компактный ядерный реактор с радиаторами: 30 эл/с. Питает ионные и аннигиляционные двигатели.' });
+part({ id: 'sail', name: 'Солнечный парус «Икар»', cat: 'utility', tech: 'solar_sails', cost: 9000, mass: 0.4, attach: 'stack', shape: 'sail',
+  dTop: 1.25, dBot: 1.25, h: 0.5, sail: { area: 10000, span: 100 }, maxTemp: 900, crash: 6,
+  desc: 'Раскрывается ступенью: зеркало 100×100 м. Свет звезды толкает вдоль оси корабля, пока парус к ней обращён. Тяга слабая, зато вечная — работает и под ускорением времени.' });
+part({ id: 'light', name: 'Прожектор ПР-1', cat: 'utility', tech: 'electrics', cost: 120, mass: 0.015, attach: 'radial', shape: 'light',
+  h: 0.22, w: 0.2, depth: 0.2, light: { range: 140, power: 900, angle: 0.5, tilt: 35, elec: 0.05 }, maxTemp: 1500, crash: 8,
+  desc: 'Клавиша U: свет на ночной посадке и между звёздами. Светит наружу от точки крепления и на 35° вниз вдоль корпуса, 0.05 эл/с.' });
 part({ id: 'legs', name: 'Посадочная опора', cat: 'utility', tech: 'gen_construction', cost: 440, mass: 0.05, attach: 'radial', shape: 'legs',
   h: 1.0, w: 0.2, depth: 0.25, legs: { len: 1.3, crash: 12 }, maxTemp: 2000, crash: 10, desc: 'Клавиша G. Мягкая посадка до 12 м/с.' });
 part({ id: 'legs_l', name: 'Большая опора', cat: 'utility', tech: 'adv_exploration', cost: 800, mass: 0.12, attach: 'radial', shape: 'legs',
@@ -198,7 +244,7 @@ for (const p of P) {
   p.res = p.res || {};
   p.wetMass = p.mass + Object.entries(p.res).reduce((s, [k, v]) => s + (k === 'ELEC' ? 0 : v), 0);
   p.fullCost = p.cost + Object.entries(p.res).reduce((s, [k, v]) => s + (RES_COST[k] || 0) * (k === 'ELEC' ? 0 : v), 0);
-  p.stageable = !!(p.engine || p.decoupler || p.chute);
+  p.stageable = !!(p.engine || p.decoupler || p.chute || p.sail);
   if (p.attach === 'stack') { p.dTop = p.dTop == null ? p.dBot : p.dTop; p.dBot = p.dBot == null ? p.dTop : p.dBot; }
   PART[p.id] = p;
 }
@@ -251,5 +297,14 @@ const TECH = [
   ['very_heavy', 'Гигантские ракеты', 550, ['heavier_rocketry'], 7, 0],
   ['nuclear', 'Ядерные двигатели', 550, ['heavier_rocketry', 'propulsion_systems'], 7, 2],
   ['ion', 'Ионные двигатели', 550, ['adv_electrics', 'propulsion_systems'], 7, 5],
-].map(([id, name, cost, req, col, row]) => ({ id, name, cost, req, col, row, parts: P.filter(p => p.tech === id && !p.hidden).map(p => p.id) }));
+  ['solar_sails', 'Солнечные паруса', 450, ['adv_electrics'], 7, 6],
+  ['nuclear_power', 'Ядерная энергетика', 800, ['nuclear', 'adv_electrics'], 8, 4],
+  ['fusion', 'Термоядерный синтез', 1600, ['nuclear_power'], 9, 3],
+  ['cryonics', 'Крионика', 1200, ['nuclear_power', 'command_modules'], 9, 5],
+  ['antimatter', 'Антиматерия', 3200, ['fusion'], 10, 3],
+  ['photon', 'Фотонные двигатели', 6000, ['antimatter'], 11, 3, true],
+  ['warp', 'Искривление пространства', 12000, ['photon'], 12, 3, true],
+  ['bases', 'Космические базы', 5000, ['nuclear_power', 'docking'], 11, 5, true],
+].map(([id, name, cost, req, col, row, scifi]) => ({ id, name, cost, req, col, row, scifi: !!scifi, parts: P.filter(p => p.tech === id && !p.hidden).map(p => p.id) }));
 const TECH_BY_ID = Object.fromEntries(TECH.map(t => [t.id, t]));
+const TECH_ALL = TECH;

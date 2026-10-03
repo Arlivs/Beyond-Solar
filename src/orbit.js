@@ -65,7 +65,17 @@ function _finishEl(mu, e, p, P, Q, W, nu, t) {
   return el;
 }
 
+// A massless frame (deep space, mu = 0): straight-line motion. Shaped like a hyperbola for callers that only look at
+// e / ra / rp / T: never bound, periapsis = the closest approach to the frame's centre.
+function linEl(r, v, t) {
+  const v2 = V.len2(v), tc = v2 > 0 ? -V.dot(r, v) / v2 : 0, h = V.cross(r, v), hl = V.len(h);
+  const W = hl > 1e-12 ? V.scale(h, 1 / hl) : [0, 0, 1];
+  return { lin: true, mu: 0, r0: r.slice(), v0: v.slice(), t0: t, e: Infinity, a: -Infinity, T: Infinity, ra: Infinity,
+    rp: tc > 0 ? V.len(V.addS(r, v, tc)) : V.len(r), inc: Math.acos(clamp(W[2], -1, 1)), W, P: V.norm(v2 > 0 ? v : r), Q: V.cross(W, V.norm(v2 > 0 ? v : r)) };
+}
+
 function elFromState(r, v, mu, t) {
+  if (mu === 0) return linEl(r, v, t);
   let h = V.cross(r, v);
   let hm = V.len(h);
   const rm = V.len(r);
@@ -110,6 +120,7 @@ function elMeanAnomaly(el, t) { return el.M0 + el.n * (t - el.t0); }
 
 // state {r, v} on the conic at time t
 function elState(el, t) {
+  if (el.lin) return { r: V.addS(el.r0, el.v0, t - el.t0), v: el.v0.slice() };
   const M = elMeanAnomaly(el, t), e = el.e;
   let x, y, vx, vy;
   if (e < 1) {
@@ -146,6 +157,7 @@ function elPosAtNu(el, nu) {
 
 // first time >= tAfter at which the orbiter passes true anomaly nu (null if never)
 function elTimeAtNu(el, nu, tAfter) {
+  if (el.lin) return null;
   const e = el.e;
   if (e < 1) {
     const E = 2 * Math.atan2(Math.sqrt(1 - e) * Math.sin(nu / 2), Math.sqrt(1 + e) * Math.cos(nu / 2));
@@ -169,6 +181,20 @@ function elNuAtRadius(el, R) {
 }
 
 function elTimeToRadius(el, R, tAfter, outbound) {
+  if (el.lin) {
+    // |r0 + v0 tau| = R
+    const a = V.len2(el.v0), b = V.dot(el.r0, el.v0), c = V.len2(el.r0) - R * R, D = b * b - a * c;
+    if (!(a > 0) || D < 0) return null;
+    const tau = (outbound ? -b + Math.sqrt(D) : -b - Math.sqrt(D)) / a, t = el.t0 + tau;
+    return t >= tAfter - 1e-6 ? t : null;
+  }
+  if (el.e >= 1) {
+    // straight from the hyperbolic anomaly: stays exact for near-radial escapes, where tan(nu/2) blows up
+    const c = (1 - R / el.a) / el.e;
+    if (!(c >= 1)) return null;
+    const H = Math.acosh(c) * (outbound ? 1 : -1), t = el.t0 + (el.e * Math.sinh(H) - H - el.M0) / el.n;
+    return t >= tAfter - 1e-6 ? t : null;
+  }
   const nu = elNuAtRadius(el, R);
   if (isNaN(nu)) return null;
   return elTimeAtNu(el, outbound ? nu : -nu, tAfter);
@@ -235,6 +261,25 @@ function findEncounter(el, body, tA, tB, skip) {
   return null;
 }
 
+// how far a body's children reach: plan = its planets (and moons' orbits), far = everything incl. other stars
+function bodyReach(b) {
+  if (b._reach) return b._reach;
+  let plan = 0, far = 0;
+  for (const c of b.children) { const r = c.el.ra + c.soi; far = Math.max(far, r); if (!c.star) plan = Math.max(plan, r); }
+  return (b._reach = { plan: plan * 1.5, far: far * 1.05 });
+}
+// encounter search split where the path crosses the edge of the planetary region: a light-year-long span
+// would otherwise force steps far larger than a planet's sphere of influence
+function findEncounterSplit(el, body, tA, tB, skip) {
+  const R = bodyReach(body), cuts = [tA];
+  if (R.plan > 0 && el.ra > R.plan) {
+    for (const out of [false, true]) { const tc = elTimeToRadius(el, R.plan, tA, out); if (tc != null && tc > tA && tc < tB) cuts.push(tc); }
+  }
+  cuts.sort((a, b) => a - b); cuts.push(tB);
+  for (let i = 0; i + 1 < cuts.length; i++) { const e = findEncounter(el, body, cuts[i], cuts[i + 1], skip); if (e) return e; }
+  return null;
+}
+
 // Predict a chain of conic patches. nodes: [{t, dv:[pro,nrm,rad]}] sorted by t.
 function predictTrajectory(body, r, v, t, opts) {
   opts = opts || {};
@@ -259,13 +304,19 @@ function predictTrajectory(body, r, v, t, opts) {
       if (ti != null && ti < tEnd) { tEnd = ti; end = useAtmo ? 'atmo' : 'impact'; next = null; }
     }
     const node = nodes[ni];
-    let searchEnd = isFinite(tEnd) ? tEnd : ct + el.T;
+    // escaping a body with no parent (the Sun): search out to where its farthest child could be met
+    let tOut = null;
+    if (!isFinite(tEnd) && el.e >= 1) {
+      const rOut = Math.max(bodyReach(cb).far, V.len(cr) * 2);
+      tOut = elTimeToRadius(el, rOut, ct, true);
+    }
+    let searchEnd = isFinite(tEnd) ? tEnd : tOut != null ? tOut : ct + el.T;
     if (node && node.t < searchEnd) searchEnd = node.t;
     if (opts.horizon) searchEnd = Math.min(searchEnd, t + opts.horizon);
-    const enc = findEncounter(el, cb, ct, searchEnd, skip);
+    const enc = findEncounterSplit(el, cb, ct, searchEnd, skip);
     if (enc) { tEnd = enc.t; end = 'enter'; next = enc.body; }
     else if (node && node.t < tEnd) { tEnd = node.t; end = 'node'; next = null; }
-    if (!isFinite(tEnd)) { tEnd = ct + el.T; end = 'none'; }
+    if (!isFinite(tEnd)) { tEnd = tOut != null ? tOut : ct + el.T; end = 'none'; }
     out.push({ body: cb, el, t0: ct, t1: tEnd, end, next, nodeIdx });
     if (end === 'none' || end === 'impact' || end === 'atmo') break;
     const st = elState(el, tEnd);
@@ -287,6 +338,7 @@ function predictTrajectory(body, r, v, t, opts) {
 // sample points (relative to the patch body) for drawing a patch
 function samplePatch(pt, n) {
   const el = pt.el, pts = [];
+  if (el.lin) { const t1 = isFinite(pt.t1) ? pt.t1 : pt.t0 + 1e9; for (let i = 0; i <= n; i++) pts.push(elState(el, pt.t0 + (t1 - pt.t0) * i / n).r); return pts; }
   let nu0 = elNuAt(el, pt.t0), nu1;
   const full = el.e < 1 && (pt.end === 'none' || pt.t1 - pt.t0 >= el.T * 0.999);
   if (full) { nu1 = nu0 + TAU; }

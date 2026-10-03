@@ -17,6 +17,8 @@ const engine = process.argv[3] === 'webkit' ? webkit : chromium;
   const shot = async (n) => { await page.screenshot({ path: path.join(__dirname, '..', 'screenshots', `_${n}.png`) }); console.log('shot', n); };
   const steps = require('./scenarios')[which];
   await steps(page, shot);
+  const loopErr = await page.evaluate(() => Game.lastError || null).catch(() => null);
+  if (loopErr) errs.push('game loop: ' + loopErr);
   console.log(errs.length ? 'ERRORS:\n' + [...new Set(errs)].slice(0, 30).join('\n') : 'no page errors');
   await browser.close();
 })();

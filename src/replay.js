@@ -158,6 +158,7 @@ function replayFrame(dt) {
   }
   for (const [key, e] of RPL.views) if (!live.has(key)) e.vw.group.visible = false;
   if (!focus) return;
+  setOrigin(focus.body.sys);
   const t = RPL.t, bAbs = bodyAbsPos(focus.body, t);
   const cam = rplCamera(D, focus, bAbs, dt);
   RV.camAbs = cam.camAbs;

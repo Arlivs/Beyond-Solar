@@ -27,6 +27,7 @@ const RACE = [
   ['uranus', 'Пролёт Урана', [1986, 1, 24], ['soi_uranus']],
   ['neptune', 'Пролёт Нептуна', [1989, 8, 25], ['soi_neptune']],
   ['titan', 'Посадка на Титан', [2005, 1, 14], ['land_titan']],
+  ['interstellar', 'Выход в межзвёздное пространство', [2012, 8, 25], ['interstellar']],
   ['pluto', 'Пролёт Плутона', [2015, 7, 14], ['soi_pluto']],
 ].map(([id, title, [y, m, d], ms], i) => ({ id, title, ut: dateToUt(Date.UTC(y, m - 1, d, 12)), ms, i }));
 const RACE_START = dateToUt(Date.UTC(1957, 0, 1, 12));
